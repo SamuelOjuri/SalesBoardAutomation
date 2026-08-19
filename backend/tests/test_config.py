@@ -22,7 +22,7 @@ def test_settings_normalise_phase_one_configuration() -> None:
         internal_email_domains="TAPEREDPLUS.CO.UK, www.Example.COM",
     )
 
-    settings = Settings(**values)
+    settings = Settings(_env_file=None, **values)
 
     assert settings.database_url.startswith("postgresql+psycopg://")
     assert settings.monday_api_version == "2026-07"
@@ -38,7 +38,7 @@ def test_settings_require_a_webhook_authentication_method() -> None:
     values["monday_webhook_shared_secret"] = "  "
 
     with pytest.raises(ValidationError, match="monday_signing_secret"):
-        Settings(**values)
+        Settings(_env_file=None, **values)
 
 
 def test_allowlist_mode_requires_at_least_one_item() -> None:
@@ -46,14 +46,14 @@ def test_allowlist_mode_requires_at_least_one_item() -> None:
     values["processing_mode"] = "allowlist"
 
     with pytest.raises(ValidationError, match="must not be empty"):
-        Settings(**values)
+        Settings(_env_file=None, **values)
 
 
 def test_runtime_board_ids_form_the_schema_contract() -> None:
     values = settings_values()
     values.update(sales_board_id=123, accounts_board_id=456)
 
-    settings = Settings(**values)
+    settings = Settings(_env_file=None, **values)
 
     assert settings.board_contract.sales_board_id == 123
     assert settings.board_contract.accounts_board_id == 456

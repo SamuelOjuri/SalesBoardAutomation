@@ -276,7 +276,8 @@ def upgrade() -> None:
         RETURNS trigger AS $$
         BEGIN
             IF NEW.input_revision IS DISTINCT FROM OLD.input_revision OR
-               NEW.input_manifest_json IS DISTINCT FROM OLD.input_manifest_json OR
+               NEW.input_manifest_json::jsonb IS DISTINCT FROM
+                   OLD.input_manifest_json::jsonb OR
                NEW.pipeline_version IS DISTINCT FROM OLD.pipeline_version THEN
                 RAISE EXCEPTION 'processing job input identity is immutable';
             END IF;
