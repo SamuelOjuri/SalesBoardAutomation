@@ -1,0 +1,12 @@
+alembic>=1.14,<2
+extract-msg>=0.52,<1
+fastapi>=0.115,<1
+google-genai>=1.0,<2
+httpx>=0.28,<1
+psycopg[binary]>=3.2,<4
+pydantic-settings>=2.7,<3
+pytest>=8.3,<9
+requests>=2.32,<3
+sqlalchemy>=2.0,<3
+tenacity>=9,<10
+uvicorn[standard]>=0.34,<1

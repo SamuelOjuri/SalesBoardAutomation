@@ -1,0 +1,331 @@
+"""Immutable board contracts and validated runtime configuration."""
+
+import json
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Annotated, Literal
+
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
+
+
+@dataclass(frozen=True)
+class PostcodeLabelContract:
+    id: int
+    name: str
+
+
+REQUIRED_POSTCODE_LABELS = tuple(
+    PostcodeLabelContract(id=label_id, name=name)
+    for label_id, name in (
+        (1, "AB"),
+        (2, "AL"),
+        (3, "B"),
+        (4, "BA"),
+        (5, "BB"),
+        (6, "BD"),
+        (7, "BF"),
+        (8, "BH"),
+        (9, "BL"),
+        (10, "BN"),
+        (11, "BR"),
+        (12, "BS"),
+        (13, "BT"),
+        (14, "CA"),
+        (15, "CB"),
+        (16, "CF"),
+        (17, "CH"),
+        (18, "CM"),
+        (20, "CO"),
+        (21, "CR"),
+        (22, "CT"),
+        (23, "CV"),
+        (24, "CW"),
+        (25, "DA"),
+        (26, "DD"),
+        (27, "DE"),
+        (28, "DG"),
+        (29, "DH"),
+        (30, "DL"),
+        (31, "DN"),
+        (32, "DT"),
+        (33, "DY"),
+        (34, "E"),
+        (35, "EC"),
+        (36, "EH"),
+        (37, "EN"),
+        (38, "EX"),
+        (39, "FK"),
+        (40, "FY"),
+        (41, "G"),
+        (42, "GL"),
+        (43, "GU"),
+        (44, "GY"),
+        (45, "HA"),
+        (46, "HD"),
+        (47, "HG"),
+        (48, "HP"),
+        (49, "HR"),
+        (50, "HS"),
+        (51, "HU"),
+        (52, "HX"),
+        (53, "IG"),
+        (54, "IP"),
+        (55, "IV"),
+        (56, "KA"),
+        (57, "KT"),
+        (58, "KW"),
+        (59, "KY"),
+        (60, "L"),
+        (61, "LA"),
+        (62, "LD"),
+        (63, "LE"),
+        (64, "LL"),
+        (65, "LN"),
+        (66, "LS"),
+        (67, "LU"),
+        (68, "M"),
+        (69, "ME"),
+        (70, "MK"),
+        (71, "ML"),
+        (72, "N"),
+        (73, "NE"),
+        (74, "NG"),
+        (75, "NN"),
+        (76, "NP"),
+        (77, "NR"),
+        (78, "NW"),
+        (79, "OL"),
+        (80, "OX"),
+        (81, "PA"),
+        (82, "PE"),
+        (83, "PH"),
+        (84, "PL"),
+        (85, "PO"),
+        (86, "PR"),
+        (87, "RG"),
+        (88, "RH"),
+        (89, "RM"),
+        (90, "S"),
+        (91, "SA"),
+        (92, "SE"),
+        (93, "SG"),
+        (94, "SK"),
+        (95, "SL"),
+        (96, "SM"),
+        (97, "SN"),
+        (98, "SO"),
+        (99, "SP"),
+        (100, "SR"),
+        (101, "SS"),
+        (102, "ST"),
+        (103, "SW"),
+        (104, "SY"),
+        (105, "TA"),
+        (106, "TD"),
+        (107, "TF"),
+        (108, "TN"),
+        (109, "TQ"),
+        (110, "TR"),
+        (111, "TS"),
+        (112, "TW"),
+        (113, "UB"),
+        (114, "W"),
+        (115, "WA"),
+        (116, "WC"),
+        (117, "WD"),
+        (119, "WF"),
+        (120, "WN"),
+        (121, "WR"),
+        (122, "WS"),
+        (123, "WV"),
+        (124, "YO"),
+        (125, "ZE"),
+    )
+)
+
+
+@dataclass(frozen=True)
+class BoardContract:
+    sales_board_id: int = 5_100_711_564
+    accounts_board_id: int = 1_654_217_230
+    email_file_column_id: str = "file_mm5erpbb"
+    accounts_relation_column_id: str = "board_relation_mm64107r"
+    postcode_column_id: str = "dropdown_mm60y5x8"
+    required_postcode_labels: tuple[
+        PostcodeLabelContract, ...
+    ] = REQUIRED_POSTCODE_LABELS
+
+
+BOARD_CONTRACT = BoardContract()
+
+
+class Settings(BaseSettings):
+    """Runtime settings loaded from environment variables or a local .env file."""
+
+    database_url: str
+    monday_ingestion_access_token: SecretStr
+    monday_signing_secret: SecretStr | None = None
+    monday_webhook_shared_secret: SecretStr | None = None
+    monday_api_url: str = "https://api.monday.com/v2"
+    monday_api_version: str = "2026-07"
+    monday_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    monday_request_max_attempts: int = Field(default=3, ge=1, le=10)
+
+    gemini_api_key: SecretStr
+    gemini_model: str
+    processing_mode: Literal["off", "shadow", "allowlist", "enabled"] = "off"
+    processing_allowlist_item_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+    internal_email_domains: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["taperedplus.co.uk"]
+    )
+
+    sales_board_id: int = Field(default=BOARD_CONTRACT.sales_board_id, gt=0)
+    accounts_board_id: int = Field(default=BOARD_CONTRACT.accounts_board_id, gt=0)
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalise_database_url(cls, value: object) -> str:
+        url = str(value).strip()
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+psycopg://", 1)
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+psycopg://", 1)
+        if not url.startswith("postgresql+psycopg://"):
+            raise ValueError("database_url must use PostgreSQL with psycopg")
+        return url
+
+    @field_validator("monday_ingestion_access_token", "gemini_api_key", mode="before")
+    @classmethod
+    def _require_nonempty_secret(cls, value: object) -> str:
+        secret = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+        if not secret.strip():
+            raise ValueError("secret must not be empty")
+        return secret.strip()
+
+    @field_validator(
+        "monday_signing_secret", "monday_webhook_shared_secret", mode="before"
+    )
+    @classmethod
+    def _normalise_optional_secret(cls, value: object) -> object:
+        if value is None:
+            return None
+        secret = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+        return secret.strip() or None
+
+    @field_validator("monday_api_url", "gemini_model", mode="before")
+    @classmethod
+    def _require_nonempty_value(cls, value: object) -> str:
+        normalised = str(value).strip()
+        if not normalised:
+            raise ValueError("value must not be empty")
+        return normalised.rstrip("/")
+
+    @field_validator("monday_api_version", mode="before")
+    @classmethod
+    def _validate_monday_api_version(cls, value: object) -> str:
+        normalised = str(value).strip()
+        year, separator, month = normalised.partition("-")
+        if separator != "-" or len(year) != 4 or len(month) != 2:
+            raise ValueError("monday_api_version must use YYYY-MM format")
+        if not year.isdecimal() or not month.isdecimal() or not 1 <= int(month) <= 12:
+            raise ValueError("monday_api_version must use YYYY-MM format")
+        return normalised
+
+    @field_validator("processing_mode", mode="before")
+    @classmethod
+    def _normalise_processing_mode(cls, value: object) -> str:
+        return str(value).strip().lower()
+
+    @field_validator("processing_allowlist_item_ids", mode="before")
+    @classmethod
+    def _normalise_allowlist(cls, value: object) -> list[str]:
+        values = _parse_list_setting(value, "processing_allowlist_item_ids")
+        normalised: list[str] = []
+        for item_id in values:
+            candidate = str(item_id).strip()
+            if not candidate.isdecimal() or int(candidate) <= 0:
+                raise ValueError(
+                    "processing_allowlist_item_ids must contain positive decimal IDs"
+                )
+            if candidate not in normalised:
+                normalised.append(candidate)
+        return normalised
+
+    @field_validator("internal_email_domains", mode="before")
+    @classmethod
+    def _normalise_internal_domains(cls, value: object) -> list[str]:
+        values = _parse_list_setting(value, "internal_email_domains")
+        normalised: list[str] = []
+        for domain in values:
+            candidate = str(domain).strip().lower().removeprefix("www.").rstrip(".")
+            if not candidate or "." not in candidate or "@" in candidate:
+                raise ValueError("internal_email_domains contains an invalid domain")
+            try:
+                candidate = candidate.encode("idna").decode("ascii")
+            except UnicodeError as error:
+                raise ValueError(
+                    "internal_email_domains contains an invalid domain"
+                ) from error
+            if candidate not in normalised:
+                normalised.append(candidate)
+        if not normalised:
+            raise ValueError("internal_email_domains must not be empty")
+        return normalised
+
+    @model_validator(mode="after")
+    def _validate_authentication_and_mode(self) -> "Settings":
+        if self.monday_signing_secret is None and self.monday_webhook_shared_secret is None:
+            raise ValueError(
+                "monday_signing_secret or monday_webhook_shared_secret is required"
+            )
+        if self.processing_mode == "allowlist" and not self.processing_allowlist_item_ids:
+            raise ValueError(
+                "processing_allowlist_item_ids must not be empty in allowlist mode"
+            )
+        return self
+
+    @property
+    def board_contract(self) -> BoardContract:
+        return BoardContract(
+            sales_board_id=self.sales_board_id,
+            accounts_board_id=self.accounts_board_id,
+        )
+
+
+def _parse_list_setting(value: object, field_name: str) -> list[object]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        raw_value = value.strip()
+        if not raw_value:
+            return []
+        if raw_value.startswith("["):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{field_name} must be CSV or a JSON array") from error
+            if not isinstance(parsed, list):
+                raise ValueError(f"{field_name} must be CSV or a JSON array")
+            return parsed
+        return raw_value.split(",")
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
