@@ -10,4 +10,5 @@ pytest>=8.3,<9
 requests>=2.32,<3
 sqlalchemy>=2.0,<3
 tenacity>=9,<10
+tldextract>=5.1,<6
 uvicorn[standard]>=0.34,<1

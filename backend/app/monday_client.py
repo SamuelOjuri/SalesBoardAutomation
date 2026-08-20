@@ -19,6 +19,27 @@ from tenacity import (
 from app.config import BOARD_CONTRACT, Settings
 
 
+_ACCOUNT_ITEM_FIELDS = """
+    id
+    name
+    state
+    column_values(ids: $column_ids) {
+        id
+        type
+        value
+        ... on TextValue {
+            text
+        }
+        ... on DropdownValue {
+            values {
+                id
+                label
+            }
+        }
+    }
+"""
+
+
 class MondayAPIError(RuntimeError):
     """Raised for a malformed or rejected Monday GraphQL response."""
 
@@ -147,6 +168,101 @@ class MondayClient:
         if not isinstance(matches[0].get("settings"), Mapping):
             raise MondayAPIError("Monday Postcode dropdown settings are unavailable")
         return matches[0]
+
+    def load_accounts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        variables: dict[str, Any] = {
+            "column_ids": [
+                BOARD_CONTRACT.account_email_domain_column_id,
+                BOARD_CONTRACT.account_duplicate_column_id,
+            ],
+            "limit": limit,
+        }
+        if cursor is None:
+            query = f"""
+                query AccountsPage(
+                    $board_ids: [ID!]!,
+                    $column_ids: [String!]!,
+                    $limit: Int!
+                ) {{
+                    boards(ids: $board_ids) {{
+                        id
+                        items_page(limit: $limit) {{
+                            cursor
+                            items {{
+                                {_ACCOUNT_ITEM_FIELDS}
+                            }}
+                        }}
+                    }}
+                }}
+            """
+            variables["board_ids"] = [str(board_id)]
+            payload = self._execute(query, variables)
+            boards = payload.get("boards")
+            if not isinstance(boards, list) or len(boards) != 1:
+                raise MondayAPIError("Monday returned an unexpected Accounts board count")
+            board = boards[0]
+            if not isinstance(board, Mapping):
+                raise MondayAPIError("Monday returned a malformed Accounts board")
+            page = board.get("items_page")
+        else:
+            if not cursor.strip():
+                raise ValueError("cursor must not be empty")
+            query = f"""
+                query AccountsNextPage(
+                    $cursor: String!,
+                    $column_ids: [String!]!,
+                    $limit: Int!
+                ) {{
+                    next_items_page(cursor: $cursor, limit: $limit) {{
+                        cursor
+                        items {{
+                            {_ACCOUNT_ITEM_FIELDS}
+                        }}
+                    }}
+                }}
+            """
+            variables["cursor"] = cursor
+            payload = self._execute(query, variables)
+            page = payload.get("next_items_page")
+        if not isinstance(page, Mapping):
+            raise MondayAPIError("Monday returned a malformed Accounts page")
+        return page
+
+    def load_account_item(self, item_id: str) -> Mapping[str, Any] | None:
+        query = f"""
+            query AccountItem($item_ids: [ID!]!, $column_ids: [String!]!) {{
+                items(ids: $item_ids) {{
+                    {_ACCOUNT_ITEM_FIELDS}
+                }}
+            }}
+        """
+        payload = self._execute(
+            query,
+            {
+                "item_ids": [str(item_id)],
+                "column_ids": [
+                    BOARD_CONTRACT.account_email_domain_column_id,
+                    BOARD_CONTRACT.account_duplicate_column_id,
+                ],
+            },
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) > 1:
+            raise MondayAPIError("Monday returned an unexpected Account item count")
+        if not items:
+            return None
+        item = items[0]
+        if not isinstance(item, Mapping):
+            raise MondayAPIError("Monday returned a malformed Account item")
+        return item
 
     def download_asset(
         self,

@@ -104,9 +104,11 @@ size and SHA-256 are revalidated immediately before parsing.
 
 `backend/app/services/postcode.py` sends the combined untrusted content to the
 configured Gemini model using a strict Pydantic response schema that can
-return only the project-location postcode. The prompt and schema explicitly
-exclude sender, recipient, company, signature, and correspondence addresses.
-Malformed or augmented model output is rejected.
+return only the project-location postcode and an explicitly stated requester
+company. The prompt and schema explicitly exclude sender, recipient,
+signature, and correspondence addresses from postcode selection. Company is
+secondary account-matching evidence only. Malformed or augmented model output
+is rejected.
 
 The extracted postcode is reduced to its alphabetic area using the pinned
 reference behavior. `MondayClient.load_postcode_dropdown_column` obtains the
@@ -116,9 +118,25 @@ For example, `WA4 6NL`, `wa4 6nl`, and `wa46nl` all resolve to `WA`, then to
 label ID `115` when that label is present in the live settings. Missing and
 unmapped postcodes produce no Monday value.
 
-Phase 3 results contain only the area, resolved label ID/value, input asset
-IDs, and an extracted-text SHA-256. Raw email and attachment content is not
-returned or logged. The default pipeline identity is `sales-postcode-v1`.
+Extraction results contain only the area, resolved label ID/value, normalized
+company evidence, input asset IDs, and an extracted-text SHA-256. Raw email and
+attachment content is not returned or logged. The default pipeline identity is
+`sales-requester-v1`.
+
+## Requester identity and Accounts index
+
+`backend/app/services/requester_identity.py` prefers an external top-level
+sender, then inspects forwarded header blocks in newest-first order when the
+top-level sender is internal. Addresses are lower-cased and IDNA-normalized;
+registrable domains are derived from an offline public-suffix snapshot. Generic
+email providers are retained as requester addresses but are never automatic
+domain evidence.
+
+`backend/app/services/accounts.py` loads every Accounts page through typed
+Monday column values, including the final page whose cursor is null. Only
+Duplicate label ID `1` excludes an item, while null and empty values remain
+eligible. Complete indexes are cached for five minutes. A selected Account is
+always re-fetched and must still be active and unflagged before publication.
 
 The application remains available when schema loading fails, but `/health`
 reports `publication_enabled: false` and the gate's issue codes. Alembic is the

@@ -43,7 +43,9 @@ def test_extract_postcode_area_preserves_reference_behaviour(
 
 
 def test_extract_parameters_uses_strict_model_result() -> None:
-    extracted = DesignParameterExtraction.model_validate({"post_code": "wa46nl"})
+    extracted = DesignParameterExtraction.model_validate(
+        {"post_code": "wa46nl", "company": "Kingsgate Construction"}
+    )
 
     assert extract_parameters("untrusted email", extracted_parameters=extracted) == {
         "Post Code": "WA"

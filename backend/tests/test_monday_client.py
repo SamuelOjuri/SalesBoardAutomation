@@ -32,6 +32,16 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
+class QueuedFakeSession(FakeSession):
+    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        super().__init__({})
+        self.payloads = payloads
+
+    def post(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append({"url": url, **kwargs})
+        return FakeResponse(self.payloads.pop(0))
+
+
 class FakeDownloadResponse:
     status_code = 200
 
@@ -130,6 +140,62 @@ def test_postcode_loader_returns_live_typed_dropdown_settings() -> None:
         == postcode_column
     )
     assert "settings" in fake_session.calls[0]["json"]["query"]
+
+
+def test_accounts_loader_uses_typed_values_and_continues_from_cursor() -> None:
+    fake_session = QueuedFakeSession(
+        [
+            {
+                "data": {
+                    "boards": [
+                        {
+                            "id": str(BOARD_CONTRACT.accounts_board_id),
+                            "items_page": {"cursor": "next", "items": []},
+                        }
+                    ]
+                }
+            },
+            {"data": {"next_items_page": {"cursor": None, "items": []}}},
+        ]
+    )
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, fake_session),
+    )
+
+    first_page = client.load_accounts_page(BOARD_CONTRACT.accounts_board_id)
+    final_page = client.load_accounts_page(
+        BOARD_CONTRACT.accounts_board_id, cursor=first_page["cursor"]
+    )
+
+    assert final_page["cursor"] is None
+    first_call, second_call = fake_session.calls
+    assert first_call["json"]["variables"] == {
+        "board_ids": [str(BOARD_CONTRACT.accounts_board_id)],
+        "column_ids": [
+            BOARD_CONTRACT.account_email_domain_column_id,
+            BOARD_CONTRACT.account_duplicate_column_id,
+        ],
+        "limit": 500,
+    }
+    assert second_call["json"]["variables"]["cursor"] == "next"
+    assert "next_items_page" in second_call["json"]["query"]
+    assert "... on DropdownValue" in first_call["json"]["query"]
+    assert "values" in first_call["json"]["query"]
+
+
+def test_selected_account_loader_returns_none_when_item_disappears() -> None:
+    fake_session = FakeSession({"data": {"items": []}})
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, fake_session),
+    )
+
+    assert client.load_account_item("42") is None
+    assert fake_session.calls[0]["json"]["variables"]["item_ids"] == ["42"]
+    assert "state" in fake_session.calls[0]["json"]["query"]
 
 
 def test_asset_download_streams_and_validates_size_and_sha256(tmp_path: Path) -> None:

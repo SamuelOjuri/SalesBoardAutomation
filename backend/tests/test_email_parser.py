@@ -81,8 +81,11 @@ def _downloaded_asset(
 
 
 class FakeExtractionClient:
-    def __init__(self, post_code: str | None) -> None:
+    def __init__(
+        self, post_code: str | None, company: str | None = None
+    ) -> None:
         self.post_code = post_code
+        self.company = company
         self.context = ""
         self.pdf_filenames: list[str] = []
 
@@ -101,7 +104,10 @@ class FakeExtractionClient:
 
     def extract_design_parameters(self, context: str) -> DesignParameterExtraction:
         self.context = context
-        return DesignParameterExtraction(post_code=self.post_code)
+        return DesignParameterExtraction(
+            post_code=self.post_code,
+            company=self.company,
+        )
 
 
 def test_eml_uses_plain_text_before_html_fallback() -> None:
@@ -227,6 +233,24 @@ def test_structured_choice_can_ignore_other_addresses(tmp_path: Path) -> None:
     assert "SW1A 1AA" in client.context
     assert "M1 1AA" in client.context
     assert result.area == "WA"
+
+
+def test_structured_company_is_carried_as_secondary_identity_evidence(
+    tmp_path: Path,
+) -> None:
+    asset = _downloaded_asset(
+        tmp_path,
+        asset_id="1",
+        content=_eml_bytes("Please quote for the supplied project."),
+    )
+    client = FakeExtractionClient(None, "  Kingsgate   Construction  ")
+
+    result = analyze_downloaded_email_assets(
+        [asset], client=client, postcode_column=_postcode_column()
+    )
+
+    assert result.company == "Kingsgate Construction"
+    assert result.monday_value is None
 
 
 def test_missing_postcode_is_unresolved_without_a_monday_value(tmp_path: Path) -> None:

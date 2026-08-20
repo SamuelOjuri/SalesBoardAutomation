@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
-PROCESSING_PIPELINE_VERSION = "sales-postcode-v1"
+PROCESSING_PIPELINE_VERSION = "sales-requester-v1"
 
 
 @dataclass(frozen=True)
@@ -156,6 +156,8 @@ class BoardContract:
     email_file_column_id: str = "file_mm5erpbb"
     accounts_relation_column_id: str = "board_relation_mm64107r"
     postcode_column_id: str = "dropdown_mm60y5x8"
+    account_email_domain_column_id: str = "text_mm6bymv5"
+    account_duplicate_column_id: str = "dropdown_mm6cxq2p"
     required_postcode_labels: tuple[
         PostcodeLabelContract, ...
     ] = REQUIRED_POSTCODE_LABELS
