@@ -16,6 +16,7 @@ from app.config import Settings, get_settings
 from app.database import create_database_engine, create_session_factory
 from app.monday_client import MondayClient
 from app.publication_gate import validate_schema_at_startup
+from app.routes.monday_webhooks import router as monday_webhook_router
 
 
 SchemaLoader = Callable[[int], Mapping[str, Any]]
@@ -32,20 +33,23 @@ def create_app(
     settings: Settings | None = None,
     schema_loader: SchemaLoader | None = None,
     engine: Engine | None = None,
+    monday_client: MondayClient | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         runtime_settings = settings or get_settings()
         database_engine = engine or create_database_engine(runtime_settings.database_url)
-        monday_client: MondayClient | None = None
+        runtime_monday_client = monday_client or MondayClient.from_settings(
+            runtime_settings
+        )
         loader = schema_loader
         if loader is None:
-            monday_client = MondayClient.from_settings(runtime_settings)
-            loader = monday_client.load_sales_board_schema
+            loader = runtime_monday_client.load_sales_board_schema
 
         application.state.settings = runtime_settings
         application.state.database_engine = database_engine
         application.state.session_factory = create_session_factory(database_engine)
+        application.state.monday_client = runtime_monday_client
         application.state.publication_gate = await run_in_threadpool(
             partial(
                 validate_schema_at_startup,
@@ -56,8 +60,8 @@ def create_app(
         try:
             yield
         finally:
-            if monday_client is not None:
-                monday_client.close()
+            if monday_client is None:
+                runtime_monday_client.close()
             if engine is None:
                 database_engine.dispose()
 
@@ -66,6 +70,7 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.include_router(monday_webhook_router)
 
     @application.get("/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:

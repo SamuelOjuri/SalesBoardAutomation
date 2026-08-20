@@ -1,9 +1,9 @@
 # Sales Board Automation
 
-The backend foundation implements the frozen Phase 0 safety contract and the
-durable Phase 1 service boundary. It does not yet accept webhooks, extract email
-content, match Accounts, or write to Monday; those behaviors belong to later
-phases.
+The backend implements the frozen Phase 0 safety contract, the durable Phase 1
+service boundary, and authenticated Phase 2 Monday intake. It does not yet
+extract email content, match Accounts, or write to Monday; those behaviors
+belong to later phases.
 
 ## Backend foundation
 
@@ -65,6 +65,35 @@ write:
 publication_gate.require_publication_enabled()
 ```
 
+## Monday intake
+
+Monday sends Email File changes to `POST /api/monday/webhooks`. Challenge
+requests are echoed as required by Monday. Event requests require HTTPS and
+either an expiring HS256 bearer token signed with `MONDAY_SIGNING_SECRET` or a
+shared secret supplied as `X-Monday-Webhook-Secret` (the reference-compatible
+`token` query parameter is also accepted).
+
+The endpoint persists the authenticated event and its deterministic
+idempotency key before fetching any item data. It then re-fetches the Sales item
+from Monday and queues work only when the event and authoritative snapshot meet
+all of these conditions:
+
+- the board is the configured Sales board;
+- the changed column is `file_mm5erpbb`;
+- the item is active; and
+- the current Email File membership includes at least one `.msg` or `.eml`.
+
+Only assets listed in the Email File column are inputs. The queue manifest is
+sorted by numeric asset ID and its revision covers asset ID, filename, size,
+and creation timestamp. Duplicate webhook delivery returns the existing event
+without another Monday read or job. A changed snapshot coalesces with an active
+job and records a supersession request without mutating that job's immutable
+input identity.
+
+`download_email_assets` provides the worker-facing download boundary. It uses
+authorized streamed downloads, checks the metadata size, computes SHA-256, and
+deletes the temporary directory on every exit path.
+
 The application remains available when schema loading fails, but `/health`
 reports `publication_enabled: false` and the gate's issue codes. Alembic is the
 only schema creation path; application startup never creates tables.
@@ -87,7 +116,7 @@ Check service and publication-gate status at `http://127.0.0.1:8000/health`.
 
 ## Tests
 
-Run the complete Phase 0 and Phase 1 suite from the repository root:
+Run the complete Phase 0 through Phase 2 suite from the repository root:
 
 ```powershell
 python -m pytest -q

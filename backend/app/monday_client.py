@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -89,6 +92,138 @@ class MondayClient:
         if not isinstance(board, Mapping):
             raise MondayAPIError("Monday returned a malformed Sales board")
         return board
+
+    def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]:
+        query = """
+            query SalesItemIntake($item_ids: [ID!]!, $column_ids: [String!]!) {
+                items(ids: $item_ids) {
+                    id
+                    state
+                    board { id }
+                    assets {
+                        id
+                        name
+                        file_size
+                        created_at
+                        url
+                        public_url
+                    }
+                    column_values(ids: $column_ids) {
+                        id
+                        type
+                        value
+                    }
+                }
+            }
+        """
+        payload = self._execute(
+            query,
+            {
+                "item_ids": [str(item_id)],
+                "column_ids": [BOARD_CONTRACT.email_file_column_id],
+            },
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) != 1:
+            raise MondayAPIError("Monday returned an unexpected Sales item count")
+        item = items[0]
+        if not isinstance(item, Mapping):
+            raise MondayAPIError("Monday returned a malformed Sales item")
+        return item
+
+    def download_asset(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        expected_size: int,
+        expected_sha256: str | None = None,
+    ) -> str:
+        if expected_size < 0:
+            raise ValueError("expected_size must not be negative")
+        if expected_sha256 is not None:
+            expected_sha256 = expected_sha256.casefold()
+            if len(expected_sha256) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in expected_sha256
+            ):
+                raise ValueError("expected_sha256 must be a hexadecimal SHA-256")
+
+        retrying = Retrying(
+            stop=stop_after_attempt(self._max_attempts),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+            retry=retry_if_exception_type(
+                (requests.ConnectionError, requests.Timeout, MondayTransientError)
+            ),
+            reraise=True,
+        )
+        return retrying(
+            self._download_once,
+            url,
+            destination,
+            expected_size,
+            expected_sha256,
+        )
+
+    def _download_once(
+        self,
+        url: str,
+        destination: Path,
+        expected_size: int,
+        expected_sha256: str | None,
+    ) -> str:
+        try:
+            response = self._session.get(
+                url,
+                headers={"Accept": "*/*"},
+                stream=True,
+                timeout=self._request_timeout_seconds,
+            )
+            try:
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise MondayTransientError(
+                        "Monday asset download failed with retryable status "
+                        f"{response.status_code}"
+                    )
+                try:
+                    response.raise_for_status()
+                except requests.HTTPError as error:
+                    raise MondayAPIError(
+                        "Monday asset download failed with status "
+                        f"{response.status_code}"
+                    ) from error
+
+                digest = hashlib.sha256()
+                downloaded_size = 0
+                with destination.open("wb") as output:
+                    for chunk in response.iter_content(chunk_size=64 * 1024):
+                        if not chunk:
+                            continue
+                        downloaded_size += len(chunk)
+                        if downloaded_size > expected_size:
+                            raise MondayTransientError(
+                                "Monday asset download exceeded its expected size"
+                            )
+                        digest.update(chunk)
+                        output.write(chunk)
+            finally:
+                response.close()
+
+            if downloaded_size != expected_size:
+                raise MondayTransientError(
+                    "Monday asset download size did not match its metadata"
+                )
+            actual_sha256 = digest.hexdigest()
+            if expected_sha256 is not None and not hmac.compare_digest(
+                actual_sha256, expected_sha256
+            ):
+                raise MondayTransientError(
+                    "Monday asset download SHA-256 did not match"
+                )
+            return actual_sha256
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
 
     def _execute(
         self, query: str, variables: Mapping[str, Any]

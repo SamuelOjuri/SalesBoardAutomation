@@ -36,6 +36,7 @@ def test_settings_normalise_phase_one_configuration() -> None:
 def test_settings_require_a_webhook_authentication_method() -> None:
     values = settings_values()
     values["monday_webhook_shared_secret"] = "  "
+    values["monday_signing_secret"] = None
 
     with pytest.raises(ValidationError, match="monday_signing_secret"):
         Settings(_env_file=None, **values)

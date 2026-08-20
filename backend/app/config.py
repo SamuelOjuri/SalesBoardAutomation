@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
+PROCESSING_PIPELINE_VERSION = "sales-intake-v1"
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr
     gemini_model: str
+    processing_pipeline_version: str = PROCESSING_PIPELINE_VERSION
     processing_mode: Literal["off", "shadow", "allowlist", "enabled"] = "off"
     processing_allowlist_item_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list
@@ -225,7 +227,9 @@ class Settings(BaseSettings):
         secret = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
         return secret.strip() or None
 
-    @field_validator("monday_api_url", "gemini_model", mode="before")
+    @field_validator(
+        "monday_api_url", "gemini_model", "processing_pipeline_version", mode="before"
+    )
     @classmethod
     def _require_nonempty_value(cls, value: object) -> str:
         normalised = str(value).strip()
