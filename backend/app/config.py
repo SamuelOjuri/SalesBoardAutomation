@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
-PROCESSING_PIPELINE_VERSION = "sales-intake-v1"
+PROCESSING_PIPELINE_VERSION = "sales-postcode-v1"
 
 
 @dataclass(frozen=True)

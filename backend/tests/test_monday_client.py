@@ -108,6 +108,30 @@ def test_intake_loader_requests_authoritative_file_membership_and_assets() -> No
     assert "column_values" in call["json"]["query"]
 
 
+def test_postcode_loader_returns_live_typed_dropdown_settings() -> None:
+    postcode_column = {
+        "id": BOARD_CONTRACT.postcode_column_id,
+        "type": "dropdown",
+        "settings": {"labels": [{"id": 115, "name": "WA"}]},
+    }
+    board = {
+        "id": str(BOARD_CONTRACT.sales_board_id),
+        "columns": [postcode_column],
+    }
+    fake_session = FakeSession({"data": {"boards": [board]}})
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, fake_session),
+    )
+
+    assert (
+        client.load_postcode_dropdown_column(BOARD_CONTRACT.sales_board_id)
+        == postcode_column
+    )
+    assert "settings" in fake_session.calls[0]["json"]["query"]
+
+
 def test_asset_download_streams_and_validates_size_and_sha256(tmp_path: Path) -> None:
     content = b"From: requester@example.com\n"
     fake_session = FakeDownloadSession(content)

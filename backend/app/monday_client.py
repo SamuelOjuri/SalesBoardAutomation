@@ -131,6 +131,23 @@ class MondayClient:
             raise MondayAPIError("Monday returned a malformed Sales item")
         return item
 
+    def load_postcode_dropdown_column(self, board_id: int) -> Mapping[str, Any]:
+        board = self.load_sales_board_schema(board_id)
+        columns = board.get("columns")
+        if not isinstance(columns, list):
+            raise MondayAPIError("Monday returned malformed Sales board columns")
+        matches = [
+            column
+            for column in columns
+            if isinstance(column, Mapping)
+            and column.get("id") == BOARD_CONTRACT.postcode_column_id
+        ]
+        if len(matches) != 1 or matches[0].get("type") != "dropdown":
+            raise MondayAPIError("Monday Postcode dropdown is unavailable")
+        if not isinstance(matches[0].get("settings"), Mapping):
+            raise MondayAPIError("Monday Postcode dropdown settings are unavailable")
+        return matches[0]
+
     def download_asset(
         self,
         url: str,

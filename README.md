@@ -1,9 +1,9 @@
 # Sales Board Automation
 
 The backend implements the frozen Phase 0 safety contract, the durable Phase 1
-service boundary, and authenticated Phase 2 Monday intake. It does not yet
-extract email content, match Accounts, or write to Monday; those behaviors
-belong to later phases.
+service boundary, authenticated Phase 2 Monday intake, and Phase 3 email and
+postcode extraction. It does not yet match Accounts, run the durable worker,
+or write to Monday; those behaviors belong to later phases.
 
 ## Backend foundation
 
@@ -94,6 +94,32 @@ input identity.
 authorized streamed downloads, checks the metadata size, computes SHA-256, and
 deletes the temporary directory on every exit path.
 
+## Email and postcode extraction
+
+`backend/app/services/email_parser.py` parses verified `.eml` and `.msg` files.
+It prefers plain-text message bodies and falls back to visible HTML text, then
+extracts text from PDF and supported image attachments through an injected
+multimodal client. Files are processed in numeric asset-ID order, and their
+size and SHA-256 are revalidated immediately before parsing.
+
+`backend/app/services/postcode.py` sends the combined untrusted content to the
+configured Gemini model using a strict Pydantic response schema that can
+return only the project-location postcode. The prompt and schema explicitly
+exclude sender, recipient, company, signature, and correspondence addresses.
+Malformed or augmented model output is rejected.
+
+The extracted postcode is reduced to its alphabetic area using the pinned
+reference behavior. `MondayClient.load_postcode_dropdown_column` obtains the
+live typed dropdown settings, and the resolver returns a value only for one
+unambiguous existing label on `dropdown_mm60y5x8`; it never creates a label.
+For example, `WA4 6NL`, `wa4 6nl`, and `wa46nl` all resolve to `WA`, then to
+label ID `115` when that label is present in the live settings. Missing and
+unmapped postcodes produce no Monday value.
+
+Phase 3 results contain only the area, resolved label ID/value, input asset
+IDs, and an extracted-text SHA-256. Raw email and attachment content is not
+returned or logged. The default pipeline identity is `sales-postcode-v1`.
+
 The application remains available when schema loading fails, but `/health`
 reports `publication_enabled: false` and the gate's issue codes. Alembic is the
 only schema creation path; application startup never creates tables.
@@ -116,7 +142,7 @@ Check service and publication-gate status at `http://127.0.0.1:8000/health`.
 
 ## Tests
 
-Run the complete Phase 0 through Phase 2 suite from the repository root:
+Run the complete Phase 0 through Phase 3 suite from the repository root:
 
 ```powershell
 python -m pytest -q
