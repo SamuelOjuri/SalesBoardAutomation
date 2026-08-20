@@ -4,11 +4,17 @@ from typing import Any
 import pytest
 
 from app.config import BOARD_CONTRACT
+from app.behavioral_contract import AccountResolution
 from app.services.accounts import (
+    AccountRecord,
     AccountsContractError,
+    AccountsIndex,
     AccountsIndexService,
+    match_account,
+    normalize_account_name,
     parse_account_item,
 )
+from app.services.requester_identity import RequesterIdentity
 
 
 def _account(
@@ -162,3 +168,187 @@ def test_malformed_duplicate_value_rejects_the_index() -> None:
 
     with pytest.raises(AccountsContractError, match="Duplicate values"):
         service.load_index()
+
+
+def _record(
+    item_id: str,
+    name: str,
+    *,
+    domain: str | None = None,
+    active: bool = True,
+    duplicate: bool = False,
+) -> AccountRecord:
+    return AccountRecord(
+        item_id=item_id,
+        name=name,
+        active=active,
+        email_domain=domain,
+        duplicate_label_ids=(1,) if duplicate else (),
+    )
+
+
+def _requester(
+    *,
+    domain: str | None,
+    company: str | None,
+) -> RequesterIdentity:
+    return RequesterIdentity(
+        email_address="requester@example.com",
+        domain=domain,
+        company=company,
+        source="top_level_sender",
+    )
+
+
+def test_unique_domain_match_requires_non_conflicting_name_evidence() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme Roofing Limited", domain="acme.co.uk"),
+            _record("20", "Other Roofing Ltd", domain="other.co.uk"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company="Acme Roofing Ltd."),
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("10")
+    assert result.reason == "unique_domain"
+    assert result.domain_candidate_ids == ("10",)
+    assert result.name_candidate_ids == ("10",)
+
+
+def test_conflicting_domain_and_name_evidence_is_unresolved() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme Roofing", domain="acme.co.uk"),
+            _record("20", "Other Roofing", domain="other.co.uk"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company="Other Roofing"),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.reason == "not_found_or_ambiguous"
+    assert result.domain_candidate_ids == ("10",)
+    assert result.name_candidate_ids == ("20",)
+
+
+def test_ambiguous_domain_match_is_unresolved() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme North", domain="acme.co.uk"),
+            _record("20", "Acme South", domain="acme.co.uk"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company=None),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.domain_candidate_ids == ("10", "20")
+
+
+def test_unique_domain_match_does_not_require_company_evidence() -> None:
+    index = AccountsIndex(
+        (_record("10", "Acme Roofing", domain="acme.co.uk"),)
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company=None),
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("10")
+    assert result.reason == "unique_domain"
+
+
+def test_flagged_duplicate_is_filtered_before_name_uniqueness() -> None:
+    index = AccountsIndex(
+        (
+            _record("1953164968", "Kingsgate Construction Ltd", duplicate=True),
+            _record("1953164969", "Kingsgate Construction Limited"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain=None, company="Kingsgate Construction"),
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("1953164969")
+    assert result.reason == "unique_exact_name"
+    assert result.name_candidate_ids == ("1953164969",)
+
+
+def test_name_only_match_must_be_unique_and_eligible() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme Ltd"),
+            _record("20", "Acme Limited", active=False),
+            _record("30", "Acme PLC"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain=None, company="Acme"),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.name_candidate_ids == ("10", "30")
+
+
+def test_name_fallback_for_unmatched_business_domain_requires_opt_in() -> None:
+    index = AccountsIndex((_record("10", "Acme Roofing Ltd"),))
+    requester = _requester(domain="acme.co.uk", company="Acme Roofing")
+
+    blocked = match_account(index, requester)
+    allowed = match_account(index, requester, allow_name_fallback=True)
+
+    assert blocked.resolution is AccountResolution.UNRESOLVED
+    assert blocked.account is None
+    assert allowed.resolution is AccountResolution.MATCHED
+    assert allowed.account == index.get("10")
+    assert allowed.reason == "unique_exact_name"
+
+
+def test_similar_name_never_auto_links() -> None:
+    index = AccountsIndex((_record("10", "Kingsgate Construction"),))
+
+    result = match_account(
+        index,
+        _requester(domain=None, company="Kingsgates Construction"),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.name_candidate_ids == ()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("  ACME & Sons, LTD.  ", "acme and sons"),
+        ("Acme-Sons Limited", "acme sons"),
+        ("LLC", None),
+        (None, None),
+    ],
+)
+def test_account_name_normalization_is_exact_and_conservative(
+    value: str | None,
+    expected: str | None,
+) -> None:
+    assert normalize_account_name(value) == expected

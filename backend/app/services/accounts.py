@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
-from app.behavioral_contract import BEHAVIORAL_CONTRACT
+from app.behavioral_contract import AccountResolution, BEHAVIORAL_CONTRACT
 from app.config import BOARD_CONTRACT
-from app.services.requester_identity import normalize_domain
+from app.services.requester_identity import RequesterIdentity, normalize_domain
+
+
+AccountMatchReason = Literal[
+    "unique_domain",
+    "unique_exact_name",
+    "not_found_or_ambiguous",
+]
+
+_LEGAL_SUFFIXES = frozenset(
+    {
+        "inc",
+        "incorporated",
+        "limited",
+        "llc",
+        "llp",
+        "ltd",
+        "plc",
+    }
+)
 
 
 class AccountsContractError(ValueError):
@@ -63,6 +83,96 @@ class AccountsIndex:
             (account for account in self.accounts if account.item_id == str(item_id)),
             None,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AccountMatchResult:
+    resolution: AccountResolution
+    account: AccountRecord | None
+    reason: AccountMatchReason
+    domain_candidate_ids: tuple[str, ...]
+    name_candidate_ids: tuple[str, ...]
+
+
+def match_account(
+    index: AccountsIndex,
+    requester: RequesterIdentity,
+    *,
+    allow_name_fallback: bool = False,
+) -> AccountMatchResult:
+    eligible = index.eligible_accounts
+    domain_matches = tuple(
+        account
+        for account in eligible
+        if requester.domain is not None
+        and account.email_domain == requester.domain
+    )
+    normalized_company = normalize_account_name(requester.company)
+    name_matches = tuple(
+        account
+        for account in eligible
+        if normalized_company is not None
+        and normalize_account_name(account.name) == normalized_company
+    )
+
+    if len(domain_matches) == 1 and not _name_evidence_conflicts(
+        domain_matches[0], name_matches
+    ):
+        return _match_result(
+            domain_matches[0], "unique_domain", domain_matches, name_matches
+        )
+    if requester.domain is None and len(name_matches) == 1:
+        return _match_result(
+            name_matches[0], "unique_exact_name", domain_matches, name_matches
+        )
+    if not domain_matches and len(name_matches) == 1 and allow_name_fallback:
+        return _match_result(
+            name_matches[0], "unique_exact_name", domain_matches, name_matches
+        )
+    return AccountMatchResult(
+        resolution=AccountResolution.UNRESOLVED,
+        account=None,
+        reason="not_found_or_ambiguous",
+        domain_candidate_ids=_candidate_ids(domain_matches),
+        name_candidate_ids=_candidate_ids(name_matches),
+    )
+
+
+def normalize_account_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    tokens = re.findall(r"[^\W_]+", value.casefold().replace("&", " and "))
+    while tokens and tokens[-1] in _LEGAL_SUFFIXES:
+        tokens.pop()
+    return " ".join(tokens) or None
+
+
+def _name_evidence_conflicts(
+    domain_match: AccountRecord,
+    name_matches: tuple[AccountRecord, ...],
+) -> bool:
+    return bool(name_matches) and (
+        len(name_matches) != 1 or name_matches[0].item_id != domain_match.item_id
+    )
+
+
+def _match_result(
+    account: AccountRecord,
+    reason: Literal["unique_domain", "unique_exact_name"],
+    domain_matches: tuple[AccountRecord, ...],
+    name_matches: tuple[AccountRecord, ...],
+) -> AccountMatchResult:
+    return AccountMatchResult(
+        resolution=AccountResolution.MATCHED,
+        account=account,
+        reason=reason,
+        domain_candidate_ids=_candidate_ids(domain_matches),
+        name_candidate_ids=_candidate_ids(name_matches),
+    )
+
+
+def _candidate_ids(accounts: tuple[AccountRecord, ...]) -> tuple[str, ...]:
+    return tuple(account.item_id for account in accounts)
 
 
 class AccountsIndexService:
