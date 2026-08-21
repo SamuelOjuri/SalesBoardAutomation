@@ -13,6 +13,7 @@ REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
 PROCESSING_PIPELINE_RELEASE = "sales-requester-v1"
 POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v1"
 POSTCODE_NORMALIZATION_REVISION = "postcode-area-v1"
+POSTCODE_LABEL_MAPPING_REVISION = "postcode-label-mapping-v1"
 REQUESTER_IDENTITY_REVISION = "requester-identity-v1"
 ACCOUNT_MATCHING_REVISION = "account-matching-v1"
 DEFAULT_EXCLUDED_SALES_GROUP_IDS = ("group_mm5eqjq4",)
@@ -23,6 +24,7 @@ def build_processing_pipeline_version(
     *,
     extraction_revision: str = POSTCODE_EXTRACTION_REVISION,
     normalization_revision: str = POSTCODE_NORMALIZATION_REVISION,
+    label_mapping_revision: str = POSTCODE_LABEL_MAPPING_REVISION,
     requester_identity_revision: str = REQUESTER_IDENTITY_REVISION,
     account_matching_revision: str = ACCOUNT_MATCHING_REVISION,
 ) -> str:
@@ -32,6 +34,7 @@ def build_processing_pipeline_version(
         "gemini": gemini_model,
         "extraction": extraction_revision,
         "normalization": normalization_revision,
+        "mapping": label_mapping_revision,
         "requester": requester_identity_revision,
         "matching": account_matching_revision,
     }

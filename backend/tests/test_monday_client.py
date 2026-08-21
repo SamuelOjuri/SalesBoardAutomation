@@ -125,7 +125,9 @@ def test_postcode_loader_returns_live_typed_dropdown_settings() -> None:
     postcode_column = {
         "id": BOARD_CONTRACT.postcode_column_id,
         "type": "dropdown",
-        "settings": {"labels": [{"id": 115, "name": "WA"}]},
+        "settings": {
+            "labels": [{"id": 115, "label": "WA", "is_deactivated": False}]
+        },
     }
     board = {
         "id": str(BOARD_CONTRACT.sales_board_id),

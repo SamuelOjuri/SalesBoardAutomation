@@ -67,7 +67,11 @@ def _postcode_column() -> dict[str, object]:
         "type": "dropdown",
         "settings": {
             "labels": [
-                {"id": label.id, "name": label.name}
+                {
+                    "id": label.id,
+                    "label": label.name,
+                    "is_deactivated": False,
+                }
                 for label in BOARD_CONTRACT.required_postcode_labels
             ]
         },

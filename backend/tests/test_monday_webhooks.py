@@ -62,7 +62,7 @@ def valid_board() -> dict[str, Any]:
                 "type": "dropdown",
                 "settings": {
                     "labels": [
-                        {"id": label.id, "name": label.name}
+                        {"id": label.id, "label": label.name}
                         for label in BOARD_CONTRACT.required_postcode_labels
                     ]
                 },

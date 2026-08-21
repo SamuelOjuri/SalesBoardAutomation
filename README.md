@@ -122,12 +122,13 @@ unmapped postcodes produce no Monday value.
 Extraction results contain only the area, resolved label ID/value, normalized
 company evidence, input asset IDs, and an extracted-text SHA-256. Raw email and
 attachment content is not returned or logged. Every job's pipeline identity is
-derived from the release, exact `GEMINI_MODEL`, postcode extraction and
-normalization revisions, requester-identity revision, and Account matching
-revision. If `PROCESSING_PIPELINE_VERSION` is set, it must exactly match that
-canonical identity or startup fails. Bump the corresponding revision constant
-in `backend/app/config.py` whenever a prompt, response schema, normalization,
-requester rule, or matching rule changes.
+derived from the release, exact `GEMINI_MODEL`, postcode extraction,
+normalization, and dropdown-label mapping revisions, requester-identity
+revision, and Account matching revision. If `PROCESSING_PIPELINE_VERSION` is
+set, it must exactly match that canonical identity or startup fails. Bump the
+corresponding revision constant in `backend/app/config.py` whenever a prompt,
+response schema, normalization, dropdown-label mapping, requester rule, or
+matching rule changes.
 
 ## Requester identity and Accounts index
 

@@ -6,6 +6,7 @@ from app.config import (
     BOARD_CONTRACT,
     DEFAULT_EXCLUDED_SALES_GROUP_IDS,
     POSTCODE_EXTRACTION_REVISION,
+    POSTCODE_LABEL_MAPPING_REVISION,
     Settings,
     build_processing_pipeline_version,
 )
@@ -56,12 +57,20 @@ def test_pipeline_version_changes_with_model_and_behavior_revisions() -> None:
 
     assert "gemini=gemini-2.5-flash-001" in baseline
     assert f"extraction={POSTCODE_EXTRACTION_REVISION}" in baseline
+    assert f"mapping={POSTCODE_LABEL_MAPPING_REVISION}" in baseline
     assert f"matching={ACCOUNT_MATCHING_REVISION}" in baseline
     assert build_processing_pipeline_version("gemini-2.5-flash-002") != baseline
     assert (
         build_processing_pipeline_version(
             "gemini-2.5-flash-001",
             extraction_revision="postcode-extraction-v2",
+        )
+        != baseline
+    )
+    assert (
+        build_processing_pipeline_version(
+            "gemini-2.5-flash-001",
+            label_mapping_revision="postcode-label-mapping-v2",
         )
         != baseline
     )

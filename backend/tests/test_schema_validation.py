@@ -26,7 +26,11 @@ def valid_board() -> dict[str, object]:
                 "type": "dropdown",
                 "settings": {
                     "labels": [
-                        {"id": label.id, "name": label.name}
+                        {
+                            "id": label.id,
+                            "label": label.name,
+                            "is_deactivated": False,
+                        }
                         for label in BOARD_CONTRACT.required_postcode_labels
                     ]
                 },
@@ -87,6 +91,8 @@ def test_legacy_settings_snapshot_is_supported(valid_board: dict[str, object]) -
     board["columns"][1].pop("settings")
     board["columns"][1]["settings_str"] = '{"boardIds":[1654217230]}'
     postcode_settings = board["columns"][2].pop("settings")
+    for label in postcode_settings["labels"]:
+        label["name"] = label.pop("label")
     board["columns"][2]["settings_str"] = json.dumps(postcode_settings)
 
     assert validate_sales_board_schema(board).publication_enabled

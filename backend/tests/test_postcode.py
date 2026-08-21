@@ -16,8 +16,8 @@ def postcode_column() -> dict[str, object]:
         "type": "dropdown",
         "settings": {
             "labels": [
-                {"id": 114, "name": "W"},
-                {"id": 115, "name": "WA"},
+                {"id": 114, "label": "W", "is_deactivated": False},
+                {"id": 115, "label": "WA", "is_deactivated": False},
             ]
         },
     }
@@ -86,10 +86,24 @@ def test_live_dropdown_maps_wa_to_label_115() -> None:
     }
 
 
+def test_legacy_name_dropdown_label_remains_supported() -> None:
+    column = postcode_column()
+    labels = column["settings"]["labels"]  # type: ignore[index]
+    for label in labels:  # type: ignore[union-attr]
+        label["name"] = label.pop("label")
+
+    resolution = resolve_postcode_label("WA4 6NL", column)
+
+    assert resolution is not None
+    assert resolution.label_id == 115
+
+
 def test_unknown_or_duplicated_live_label_is_never_created_or_selected() -> None:
     column = postcode_column()
     labels = column["settings"]["labels"]  # type: ignore[index]
-    labels.append({"id": 999, "name": "WA"})  # type: ignore[union-attr]
+    labels.append(  # type: ignore[union-attr]
+        {"id": 999, "label": "WA", "is_deactivated": False}
+    )
 
     assert resolve_postcode_label("WA4 6NL", column) is None
     assert format_dropdown_for_monday("ZZ1 1ZZ", postcode_column()) is None

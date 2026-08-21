@@ -297,7 +297,9 @@ def resolve_postcode_label(
     for label in labels:
         if not isinstance(label, Mapping):
             continue
-        name = label.get("name")
+        # Monday's typed Column.settings payload uses ``label``. Older saved
+        # schema snapshots used ``name``, so accept that only as a fallback.
+        name = label.get("label", label.get("name"))
         label_id = label.get("id")
         if not isinstance(name, str) or name.strip().upper() != area:
             continue

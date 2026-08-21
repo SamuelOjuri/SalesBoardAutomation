@@ -21,7 +21,9 @@ def _postcode_column() -> dict[str, object]:
     return {
         "id": "dropdown_mm60y5x8",
         "type": "dropdown",
-        "settings": {"labels": [{"id": 115, "name": "WA"}]},
+        "settings": {
+            "labels": [{"id": 115, "label": "WA", "is_deactivated": False}]
+        },
     }
 
 

@@ -219,7 +219,9 @@ def _validate_postcode_labels(
         if not isinstance(raw_label, Mapping):
             continue
         label_id = _normalise_id(raw_label.get("id"))
-        label_name = raw_label.get("name")
+        # Monday's typed Column.settings payload uses ``label``. Retain
+        # ``name`` only for the legacy settings snapshots supported above.
+        label_name = raw_label.get("label", raw_label.get("name"))
         if label_id is None or not isinstance(label_name, str):
             continue
         labels_by_name.setdefault(label_name, set()).add(label_id)

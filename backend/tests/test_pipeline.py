@@ -101,7 +101,9 @@ class FakeMonday:
         return {
             "id": BOARD_CONTRACT.postcode_column_id,
             "type": "dropdown",
-            "settings": {"labels": [{"id": 115, "name": "WA"}]},
+            "settings": {
+                "labels": [{"id": 115, "label": "WA", "is_deactivated": False}]
+            },
         }
 
     def download_asset(
