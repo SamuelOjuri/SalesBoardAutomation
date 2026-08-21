@@ -1,8 +1,8 @@
 # Sales Board Automation
 
-The backend implements the frozen Phase 0 safety contract through Phase 6 safe
-Monday publication. It does not yet run the Phase 7 durable worker or invoke
-the analysis and publication services from a background process.
+The backend implements the frozen Phase 0 safety contract through the Phase 7
+durable worker and operator controls. The FastAPI webhook and background worker
+run as separate processes against the same PostgreSQL queue.
 
 ## Backend foundation
 
@@ -166,6 +166,60 @@ The application remains available when schema loading fails, but `/health`
 reports `publication_enabled: false` and the gate's issue codes. Alembic is the
 only schema creation path; application startup never creates tables.
 
+## Durable worker and operations
+
+`backend/app/worker.py` is the separate background process. It claims due jobs
+with PostgreSQL row locks and `SKIP LOCKED`, records lease ownership, sends
+heartbeats from short independent transactions, and recovers expired leases.
+Failures retain the last completed stage and use capped exponential retry.
+Only exception types, job IDs, item IDs, and structured outcomes are logged;
+email and model content are not persisted in logs or error fields.
+
+`backend/app/services/pipeline.py` commits checkpoints after `extracting`,
+`matching_account`, `validating`, and `publishing`. A retry resumes from the
+saved stage. Every checkpoint verifies lease ownership and the immutable input
+identity. If Monday or a newer webhook exposes changed Email input, the worker
+cancels the leased job and creates an immutable successor for the authoritative
+snapshot. A retry after an ambiguous publication remains safe because Phase 6
+post-reads Monday and complete-value writes are idempotent.
+
+Processing modes are enforced by the worker:
+
+- `off` recovers expired leases but claims no work;
+- `shadow` analyzes and validates all queued items but performs no mutations;
+- `allowlist` analyzes and publishes only `PROCESSING_ALLOWLIST_ITEM_IDS`; and
+- `enabled` analyzes and publishes all eligible queued items.
+
+Run a background worker from the repository root:
+
+```powershell
+python -m app.worker
+```
+
+Set `PYTHONPATH=backend` for that command, or use Render's worker start command:
+
+```text
+cd backend && python -m app.worker
+```
+
+Phase 1 already created all stage, lease, heartbeat, retry, result, and audit
+columns used by the worker, so Phase 7 does not require another migration.
+
+Operator commands use the same queue and identity checks:
+
+```powershell
+$env:PYTHONPATH = "backend"
+python -m app.operator enqueue 1234567890
+python -m app.operator retry 00000000-0000-0000-0000-000000000000
+python -m app.operator reconcile 1234567890
+python -m app.operator metrics
+```
+
+Worker timing can be tuned with `WORKER_POLL_INTERVAL_SECONDS`,
+`WORKER_HEARTBEAT_INTERVAL_SECONDS`, `WORKER_LEASE_TIMEOUT_SECONDS`,
+`WORKER_RETRY_BASE_SECONDS`, and `WORKER_RETRY_MAX_SECONDS`. The heartbeat
+interval must remain shorter than the lease timeout.
+
 ## Local setup
 
 Create a PostgreSQL database, install dependencies, and create a local `.env`
@@ -178,13 +232,15 @@ From the repository root:
 python -m pip install -r requirements.txt
 python -m alembic -c alembic.ini upgrade head
 python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+$env:PYTHONPATH = "backend"
+python -m app.worker
 ```
 
 Check service and publication-gate status at `http://127.0.0.1:8000/health`.
 
 ## Tests
 
-Run the complete Phase 0 through Phase 6 suite from the repository root:
+Run the complete Phase 0 through Phase 7 suite from the repository root:
 
 ```powershell
 python -m pytest -q

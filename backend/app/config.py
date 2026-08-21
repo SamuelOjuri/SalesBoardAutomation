@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     processing_allowlist_item_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list
     )
+    worker_poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
+    worker_heartbeat_interval_seconds: float = Field(default=30.0, gt=0, le=300)
+    worker_lease_timeout_seconds: float = Field(default=300.0, gt=0, le=3600)
+    worker_retry_base_seconds: float = Field(default=30.0, gt=0, le=3600)
+    worker_retry_max_seconds: float = Field(default=900.0, gt=0, le=86400)
     internal_email_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["taperedplus.co.uk"]
     )
@@ -300,6 +305,14 @@ class Settings(BaseSettings):
         if self.processing_mode == "allowlist" and not self.processing_allowlist_item_ids:
             raise ValueError(
                 "processing_allowlist_item_ids must not be empty in allowlist mode"
+            )
+        if self.worker_heartbeat_interval_seconds >= self.worker_lease_timeout_seconds:
+            raise ValueError(
+                "worker heartbeat interval must be shorter than the lease timeout"
+            )
+        if self.worker_retry_base_seconds > self.worker_retry_max_seconds:
+            raise ValueError(
+                "worker retry base must not exceed the maximum retry delay"
             )
         return self
 

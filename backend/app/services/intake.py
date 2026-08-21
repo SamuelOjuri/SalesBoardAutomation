@@ -158,8 +158,9 @@ def queue_sales_item_snapshot(
     session: Session,
     snapshot: SalesItemSnapshot,
     *,
-    webhook_event_id: uuid.UUID,
+    webhook_event_id: uuid.UUID | None = None,
     pipeline_version: str,
+    trigger_type: str = "webhook_email",
     now: datetime | None = None,
 ) -> IntakeQueueResult:
     if not snapshot.active:
@@ -211,6 +212,7 @@ def queue_sales_item_snapshot(
             item=item,
             job=active_job,
             webhook_event_id=webhook_event_id,
+            trigger_type=trigger_type,
             outcome="coalesced",
             input_revision=revision,
             pipeline_version=pipeline_version,
@@ -220,7 +222,7 @@ def queue_sales_item_snapshot(
     candidate_job = ProcessingJob(
         board_id=snapshot.board_id,
         item_id=snapshot.item_id,
-        trigger_type="webhook_email",
+        trigger_type=trigger_type,
         input_revision=revision,
         input_manifest_json=manifest,
         pipeline_version=pipeline_version,
@@ -248,6 +250,7 @@ def queue_sales_item_snapshot(
         item=item,
         job=job,
         webhook_event_id=webhook_event_id,
+        trigger_type=trigger_type,
         outcome=outcome,
         input_revision=revision,
         pipeline_version=pipeline_version,
@@ -318,7 +321,8 @@ def _add_intake_audit(
     *,
     item: ProcessingItem,
     job: ProcessingJob,
-    webhook_event_id: uuid.UUID,
+    webhook_event_id: uuid.UUID | None,
+    trigger_type: str,
     outcome: str,
     input_revision: str,
     pipeline_version: str,
@@ -329,12 +333,16 @@ def _add_intake_audit(
             item_id=item.item_id,
             job_id=job.id,
             webhook_event_id=webhook_event_id,
-            event_type="webhook_intake",
+            event_type=(
+                "webhook_intake"
+                if trigger_type == "webhook_email"
+                else "processing_intake"
+            ),
             stage=ProcessingJobStage.EXTRACTING.value,
             outcome=outcome,
             input_revision=input_revision,
             pipeline_version=pipeline_version,
-            details_json={},
+            details_json={"triggerType": trigger_type},
         )
     )
 
