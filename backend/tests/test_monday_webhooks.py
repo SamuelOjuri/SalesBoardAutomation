@@ -10,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
 
-from app.config import BOARD_CONTRACT, Settings
+from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS, Settings
 from app.database import Base, create_database_engine, create_session_factory
 from app.main import create_app
 from app.models import ProcessingJob, WebhookEvent, WebhookEventStatus
@@ -63,11 +63,17 @@ def valid_board() -> dict[str, Any]:
     }
 
 
-def intake_item(*, state: str = "active", filename: str = "request.eml") -> dict[str, Any]:
+def intake_item(
+    *,
+    state: str = "active",
+    filename: str = "request.eml",
+    group_id: str = "topics",
+) -> dict[str, Any]:
     return {
         "id": "42",
         "state": state,
         "board": {"id": str(BOARD_CONTRACT.sales_board_id)},
+        "group": {"id": group_id, "title": "Test Group"},
         "assets": [
             {
                 "id": "7",
@@ -230,6 +236,28 @@ def test_ineligible_authoritative_snapshot_does_not_enqueue(
     assert response.status_code == 200
     assert response.json()["reason"] == reason
     with create_session_factory(engine)() as session:
+        assert session.query(ProcessingJob).count() == 0
+
+
+def test_excluded_authoritative_group_does_not_enqueue(
+    webhook_application: tuple[Any, ...]
+) -> None:
+    application, engine, monday_client = webhook_application
+    monday_client.item = intake_item(
+        group_id=DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+    )
+
+    response = post_requests(
+        application, [(webhook_payload(), shared_secret_headers())]
+    )[0]
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert response.json()["reason"] == "group_excluded"
+    with create_session_factory(engine)() as session:
+        event = session.query(WebhookEvent).one()
+        assert event.authenticated is True
+        assert event.status == WebhookEventStatus.PROCESSED.value
         assert session.query(ProcessingJob).count() == 0
 
 

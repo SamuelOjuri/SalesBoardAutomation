@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.config import BOARD_CONTRACT
+from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.input_revision import EmailAssetIdentity, compute_input_revision
 from app.monday_client import MondayTransientError
 from app.publication_gate import PublicationDisabledError, PublicationGate
@@ -32,11 +32,13 @@ def _sales_item(
     postcode_ids: tuple[int, ...] = (),
     account_ids: tuple[str, ...] = (),
     asset: EmailAssetIdentity = ASSET,
+    group_id: str = "topics",
 ) -> dict[str, Any]:
     return {
         "id": "42",
         "state": "active",
         "board": {"id": str(BOARD_CONTRACT.sales_board_id)},
+        "group": {"id": group_id, "title": "Test Group"},
         "assets": [
             {
                 "id": asset.asset_id,
@@ -259,6 +261,26 @@ def test_changed_input_revision_blocks_all_writes() -> None:
             postcode_label_id=115,
         )
 
+    assert client.mutations == []
+
+
+def test_excluded_group_blocks_all_writes() -> None:
+    excluded_group_id = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+    client = FakePublicationClient(
+        [_sales_item(group_id=excluded_group_id)]
+    )
+
+    with pytest.raises(StalePublicationError, match="excluded group"):
+        publish_sales_item(
+            client=client,
+            publication_gate=_enabled_gate(),
+            item_id="42",
+            input_revision=INPUT_REVISION,
+            postcode_label_id=115,
+            excluded_group_ids=(excluded_group_id,),
+        )
+
+    assert client.reads == ["42"]
     assert client.mutations == []
 
 

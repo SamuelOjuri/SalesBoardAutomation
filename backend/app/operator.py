@@ -74,6 +74,7 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
                     monday_client,
                     arguments.item_id,
                     pipeline_version=settings.processing_pipeline_version,
+                    excluded_group_ids=settings.processing_excluded_group_ids,
                 )
                 session.commit()
                 return {
@@ -88,6 +89,7 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
                     monday_client,
                     arguments.item_id,
                     pipeline_version=settings.processing_pipeline_version,
+                    excluded_group_ids=settings.processing_excluded_group_ids,
                 )
                 session.commit()
                 return {

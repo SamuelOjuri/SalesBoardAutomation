@@ -79,6 +79,8 @@ all of these conditions:
 
 - the board is the configured Sales board;
 - the changed column is `file_mm5erpbb`;
+- the item is not in a group listed by `PROCESSING_EXCLUDED_GROUP_IDS`
+  (`group_mm5eqjq4`, Completed Folder, by default);
 - the item is active; and
 - the current Email File membership includes at least one `.msg` or `.eml`.
 
@@ -189,6 +191,13 @@ Processing modes are enforced by the worker:
 - `shadow` analyzes and validates all queued items but performs no mutations;
 - `allowlist` analyzes and publishes only `PROCESSING_ALLOWLIST_ITEM_IDS`; and
 - `enabled` analyzes and publishes all eligible queued items.
+
+Group exclusion is enforced independently of processing mode. The web process
+does not enqueue an authoritative item whose current group ID is listed in
+`PROCESSING_EXCLUDED_GROUP_IDS`. The worker rechecks the group before each
+remaining stage and cancels a queued job as ineligible if the item has moved
+into an excluded group. Publication performs the same authoritative check
+immediately before any write.
 
 Run a background worker from the repository root:
 

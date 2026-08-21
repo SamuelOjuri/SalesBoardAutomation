@@ -127,6 +127,7 @@ def create_worker_runtime(
         accounts=accounts,
         publication_gate=gate,
         internal_email_domains=tuple(runtime_settings.internal_email_domains),
+        excluded_group_ids=tuple(runtime_settings.processing_excluded_group_ids),
     )
     runtime = WorkerRuntime(
         settings=runtime_settings,

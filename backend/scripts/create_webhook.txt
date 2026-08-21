@@ -100,3 +100,107 @@ $response.data.create_webhook | Format-List
 $appAccessToken = $null
 $credential = $null
 $secureToken.Dispose()
+
+
+
+############################
+
+-- Recreate webhook
+
+$secureToken = Read-Host "Paste the app OAuth access token" -AsSecureString
+$credential = New-Object System.Management.Automation.PSCredential (
+    "unused",
+    $secureToken
+)
+$appAccessToken = $credential.GetNetworkCredential().Password
+
+$headers = @{
+    Authorization = $appAccessToken
+    "API-Version" = "2026-07"
+}
+
+try {
+    # Delete the disabled webhook.
+    $deleteMutation = @'
+mutation DeleteEmailFileWebhook($webhookId: ID!) {
+  delete_webhook(id: $webhookId) {
+    id
+  }
+}
+'@
+
+    $deleteBody = @{
+        query = $deleteMutation
+        variables = @{
+            webhookId = "182215685"
+        }
+    } | ConvertTo-Json -Depth 10
+
+    $deleteResponse = Invoke-RestMethod `
+        -Method Post `
+        -Uri "https://api.monday.com/v2" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $deleteBody
+
+    if ($deleteResponse.errors) {
+        $deleteResponse.errors | ConvertTo-Json -Depth 10
+        throw "monday failed to delete the disabled webhook"
+    }
+
+    Write-Host "Deleted webhook:"
+    $deleteResponse.data.delete_webhook | Format-List
+
+    # Create a fresh app-owned webhook.
+    $createMutation = @'
+mutation CreateEmailFileWebhook(
+  $boardId: ID!
+  $url: String!
+  $config: JSON!
+) {
+  create_webhook(
+    board_id: $boardId
+    url: $url
+    event: change_specific_column_value
+    config: $config
+  ) {
+    id
+    board_id
+    event
+    config
+  }
+}
+'@
+
+    $createBody = @{
+        query = $createMutation
+        variables = @{
+            boardId = "5100711564"
+            url = "https://salesboardautomation.onrender.com/api/monday/webhooks"
+            config = '{"columnId":"file_mm5erpbb"}'
+        }
+    } | ConvertTo-Json -Depth 10
+
+    $createResponse = Invoke-RestMethod `
+        -Method Post `
+        -Uri "https://api.monday.com/v2" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $createBody
+
+    if ($createResponse.errors) {
+        $createResponse.errors | ConvertTo-Json -Depth 10
+        throw "monday failed to create the replacement webhook"
+    }
+
+    Write-Host "Created replacement webhook:"
+    $createResponse.data.create_webhook | Format-List
+}
+finally {
+    $appAccessToken = $null
+    $headers = $null
+    $deleteBody = $null
+    $createBody = $null
+    $credential = $null
+    $secureToken.Dispose()
+}

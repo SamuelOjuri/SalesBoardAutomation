@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -13,7 +13,11 @@ from app.input_revision import compute_input_revision
 from app.monday_client import MondayTransientError
 from app.publication_gate import PublicationGate
 from app.services.accounts import AccountRecord
-from app.services.intake import IntakeContractError, parse_sales_item_snapshot
+from app.services.intake import (
+    IntakeContractError,
+    is_excluded_sales_group,
+    parse_sales_item_snapshot,
+)
 
 
 ColumnPublicationOutcome = Literal[
@@ -60,6 +64,7 @@ class AccountRevalidator(Protocol):
 class SalesPublicationSnapshot:
     item_id: str
     board_id: str
+    group_id: str
     active: bool
     input_revision: str
     postcode_label_ids: tuple[str, ...]
@@ -92,6 +97,7 @@ def publish_sales_item(
     postcode_label_id: int | None = None,
     account_item_id: str | None = None,
     accounts: AccountRevalidator | None = None,
+    excluded_group_ids: Sequence[str] = (),
 ) -> PublicationResult:
     normalized_item_id = _positive_decimal_id(item_id, "Sales item ID")
     normalized_revision = _input_revision(input_revision)
@@ -100,6 +106,13 @@ def publish_sales_item(
         _positive_decimal_id(account_item_id, "Account item ID")
         if account_item_id is not None
         else None
+    )
+
+    before = _load_current_snapshot(
+        client,
+        normalized_item_id,
+        normalized_revision,
+        excluded_group_ids=excluded_group_ids,
     )
 
     account_is_eligible = False
@@ -115,11 +128,6 @@ def publish_sales_item(
             and selected_account.eligible
         )
 
-    before = _load_current_snapshot(
-        client,
-        normalized_item_id,
-        normalized_revision,
-    )
     postcode = _decide_column(
         before.postcode_label_ids,
         normalized_postcode_id,
@@ -172,6 +180,7 @@ def publish_sales_item(
         client,
         normalized_item_id,
         normalized_revision,
+        excluded_group_ids=excluded_group_ids,
     )
     postcode, postcode_confirmed = _reconcile_column(
         postcode,
@@ -227,6 +236,7 @@ def parse_sales_publication_snapshot(
     return SalesPublicationSnapshot(
         item_id=intake.item_id,
         board_id=intake.board_id,
+        group_id=intake.group_id,
         active=intake.active,
         input_revision=input_revision,
         postcode_label_ids=_typed_ids(postcode_column, "values", "id"),
@@ -242,6 +252,8 @@ def _load_current_snapshot(
     client: SalesPublicationClient,
     item_id: str,
     input_revision: str,
+    *,
+    excluded_group_ids: Sequence[str] = (),
 ) -> SalesPublicationSnapshot:
     snapshot = parse_sales_publication_snapshot(
         client.load_sales_item_for_publication(item_id)
@@ -254,6 +266,8 @@ def _load_current_snapshot(
         )
     if not snapshot.active:
         raise StalePublicationError("Sales item is no longer active")
+    if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):
+        raise StalePublicationError("Sales item belongs to an excluded group")
     if snapshot.input_revision != input_revision:
         raise StalePublicationError("Sales item input revision has changed")
     return snapshot

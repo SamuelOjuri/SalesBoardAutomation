@@ -32,6 +32,7 @@ from app.services.intake import (
     DownloadedEmailAsset,
     SalesItemSnapshot,
     download_email_assets,
+    is_excluded_sales_group,
     parse_sales_item_snapshot,
     queue_sales_item_snapshot,
 )
@@ -77,6 +78,7 @@ class PipelineDependencies:
     accounts: AccountsIndexService
     publication_gate: PublicationGate
     internal_email_domains: tuple[str, ...]
+    excluded_group_ids: tuple[str, ...] = ()
     allow_name_fallback: bool = False
 
 
@@ -197,12 +199,17 @@ def _run_extraction_stage(
 ) -> bool:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
     snapshot = _load_snapshot(dependencies.monday, job.item_id)
-    if not _snapshot_matches_job(snapshot, job):
+    if not _snapshot_matches_job(
+        snapshot,
+        job,
+        dependencies.excluded_group_ids,
+    ):
         _replace_with_snapshot(
             session_factory,
             job_id,
             worker_id=worker_id,
             snapshot=snapshot,
+            excluded_group_ids=dependencies.excluded_group_ids,
             now=now,
         )
         return False
@@ -264,6 +271,21 @@ def _run_matching_stage(
     now: datetime,
 ) -> bool:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
+    snapshot = _load_snapshot(dependencies.monday, job.item_id)
+    if not _snapshot_matches_job(
+        snapshot,
+        job,
+        dependencies.excluded_group_ids,
+    ):
+        _replace_with_snapshot(
+            session_factory,
+            job_id,
+            worker_id=worker_id,
+            snapshot=snapshot,
+            excluded_group_ids=dependencies.excluded_group_ids,
+            now=now,
+        )
+        return False
     result = _current_result(job, ProcessingJobStage.EXTRACTING.value)
     requester = _requester_from_payload(result.get("requester"))
     account_match = match_account(
@@ -312,12 +334,17 @@ def _run_validation_stage(
 ) -> Literal["publishing", "shadow_completed", "superseded"]:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
     snapshot = _load_snapshot(dependencies.monday, job.item_id)
-    if not _snapshot_matches_job(snapshot, job):
+    if not _snapshot_matches_job(
+        snapshot,
+        job,
+        dependencies.excluded_group_ids,
+    ):
         _replace_with_snapshot(
             session_factory,
             job_id,
             worker_id=worker_id,
             snapshot=snapshot,
+            excluded_group_ids=dependencies.excluded_group_ids,
             now=now,
         )
         return "superseded"
@@ -384,6 +411,7 @@ def _run_publication_stage(
             str(account_item_id) if account_item_id is not None else None
         ),
         accounts=dependencies.accounts,
+        excluded_group_ids=dependencies.excluded_group_ids,
     )
 
     with session_factory() as session:
@@ -424,6 +452,7 @@ def _replace_with_authoritative_input(
         job_id,
         worker_id=worker_id,
         snapshot=snapshot,
+        excluded_group_ids=dependencies.excluded_group_ids,
         now=now,
     )
 
@@ -434,20 +463,25 @@ def _replace_with_snapshot(
     *,
     worker_id: str,
     snapshot: SalesItemSnapshot,
+    excluded_group_ids: Sequence[str],
     now: datetime,
 ) -> None:
     with session_factory() as session:
         job = lock_owned_job(session, job_id, worker_id=worker_id)
         item = _lock_item(session, job)
+        group_excluded = is_excluded_sales_group(
+            snapshot.group_id,
+            excluded_group_ids,
+        )
         replacement_revision = (
             compute_input_revision(asset.identity for asset in snapshot.email_assets)
-            if snapshot.active and snapshot.email_assets
+            if snapshot.active and snapshot.email_assets and not group_excluded
             else None
         )
         job.status = ProcessingJobStatus.CANCELLED.value
         job.completed_at = now
         job.superseded_by_revision = replacement_revision
-        job.last_error = "InputSuperseded"
+        job.last_error = "GroupExcluded" if group_excluded else "InputSuperseded"
         job.locked_at = None
         job.locked_by = None
         job.heartbeat_at = None
@@ -455,9 +489,12 @@ def _replace_with_snapshot(
             session,
             item,
             job,
-            event_type="input_supersession",
-            outcome="cancelled",
-            details={"supersededByRevision": replacement_revision},
+            event_type=("group_exclusion" if group_excluded else "input_supersession"),
+            outcome=("excluded_group" if group_excluded else "cancelled"),
+            details={
+                "groupId": snapshot.group_id,
+                "supersededByRevision": replacement_revision,
+            },
         )
         if replacement_revision is None:
             item.latest_input_revision = None
@@ -473,6 +510,7 @@ def _replace_with_snapshot(
                 snapshot,
                 pipeline_version=job.pipeline_version,
                 trigger_type="input_supersession",
+                excluded_group_ids=excluded_group_ids,
                 now=now,
             )
         session.commit()
@@ -491,9 +529,11 @@ def _load_snapshot(
 def _snapshot_matches_job(
     snapshot: SalesItemSnapshot,
     job: ProcessingJob,
+    excluded_group_ids: Sequence[str] = (),
 ) -> bool:
     if (
         not snapshot.active
+        or is_excluded_sales_group(snapshot.group_id, excluded_group_ids)
         or snapshot.board_id != job.board_id
         or snapshot.item_id != job.item_id
         or not snapshot.email_assets

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
@@ -24,6 +24,7 @@ from app.models import (
 from app.services.intake import (
     IntakeQueueResult,
     SalesItemSnapshot,
+    is_excluded_sales_group,
     parse_sales_item_snapshot,
     queue_sales_item_snapshot,
 )
@@ -69,9 +70,12 @@ def enqueue_sales_item(
     item_id: str,
     *,
     pipeline_version: str,
+    excluded_group_ids: Sequence[str] = (),
     now: datetime | None = None,
 ) -> IntakeQueueResult:
     snapshot = _authoritative_snapshot(client, item_id)
+    if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):
+        raise ValueError("Sales item belongs to an excluded group")
     if not snapshot.active or not snapshot.email_assets:
         raise ValueError("Sales item has no active supported Email input")
     return queue_sales_item_snapshot(
@@ -79,6 +83,7 @@ def enqueue_sales_item(
         snapshot,
         pipeline_version=pipeline_version,
         trigger_type="operator_enqueue",
+        excluded_group_ids=excluded_group_ids,
         now=now,
     )
 
@@ -89,16 +94,22 @@ def reconcile_sales_item(
     item_id: str,
     *,
     pipeline_version: str,
+    excluded_group_ids: Sequence[str] = (),
     now: datetime | None = None,
 ) -> ReconcileResult:
     reconciled_at = now or utc_now()
     snapshot = _authoritative_snapshot(client, item_id)
-    if snapshot.active and snapshot.email_assets:
+    group_excluded = is_excluded_sales_group(
+        snapshot.group_id,
+        excluded_group_ids,
+    )
+    if snapshot.active and snapshot.email_assets and not group_excluded:
         queued = queue_sales_item_snapshot(
             session,
             snapshot,
             pipeline_version=pipeline_version,
             trigger_type="operator_reconcile",
+            excluded_group_ids=excluded_group_ids,
             now=reconciled_at,
         )
         return ReconcileResult(
@@ -153,7 +164,11 @@ def reconcile_sales_item(
         running_job,
         event_type="operator_reconcile",
         outcome="ineligible",
-        details={"active": snapshot.active},
+        details={
+            "active": snapshot.active,
+            "groupExcluded": group_excluded,
+            "groupId": snapshot.group_id,
+        },
     )
     session.flush()
     return ReconcileResult(

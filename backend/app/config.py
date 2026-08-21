@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
 PROCESSING_PIPELINE_VERSION = "sales-requester-v1"
+DEFAULT_EXCLUDED_SALES_GROUP_IDS = ("group_mm5eqjq4",)
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,9 @@ class Settings(BaseSettings):
     processing_allowlist_item_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list
     )
+    processing_excluded_group_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_EXCLUDED_SALES_GROUP_IDS)
+    )
     worker_poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
     worker_heartbeat_interval_seconds: float = Field(default=30.0, gt=0, le=300)
     worker_lease_timeout_seconds: float = Field(default=300.0, gt=0, le=3600)
@@ -270,6 +274,21 @@ class Settings(BaseSettings):
             if not candidate.isdecimal() or int(candidate) <= 0:
                 raise ValueError(
                     "processing_allowlist_item_ids must contain positive decimal IDs"
+                )
+            if candidate not in normalised:
+                normalised.append(candidate)
+        return normalised
+
+    @field_validator("processing_excluded_group_ids", mode="before")
+    @classmethod
+    def _normalise_excluded_group_ids(cls, value: object) -> list[str]:
+        values = _parse_list_setting(value, "processing_excluded_group_ids")
+        normalised: list[str] = []
+        for group_id in values:
+            candidate = str(group_id).strip()
+            if not candidate:
+                raise ValueError(
+                    "processing_excluded_group_ids must contain non-empty IDs"
                 )
             if candidate not in normalised:
                 normalised.append(candidate)

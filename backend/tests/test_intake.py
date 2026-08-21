@@ -22,6 +22,7 @@ def item_snapshot() -> dict[str, Any]:
         "id": "42",
         "state": "active",
         "board": {"id": str(BOARD_CONTRACT.sales_board_id)},
+        "group": {"id": "topics", "title": "Outstanding Emails"},
         "assets": [
             {
                 "id": "10",
@@ -55,6 +56,7 @@ def test_snapshot_uses_only_supported_email_file_members() -> None:
 
     assert snapshot.active is True
     assert snapshot.board_id == str(BOARD_CONTRACT.sales_board_id)
+    assert snapshot.group_id == "topics"
     assert [asset.identity.asset_id for asset in snapshot.email_assets] == ["2"]
     assert snapshot.email_assets[0].identity.size_bytes == 12
 
@@ -66,6 +68,14 @@ def test_snapshot_does_not_use_assets_outside_email_file_membership() -> None:
     snapshot = parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
 
     assert snapshot.email_assets == ()
+
+
+def test_snapshot_requires_an_authoritative_group() -> None:
+    raw_item = item_snapshot()
+    raw_item.pop("group")
+
+    with pytest.raises(IntakeContractError, match="item group"):
+        parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
 
 
 @pytest.mark.parametrize(

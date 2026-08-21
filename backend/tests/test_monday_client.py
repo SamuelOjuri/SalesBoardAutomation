@@ -118,6 +118,7 @@ def test_intake_loader_requests_authoritative_file_membership_and_assets() -> No
     }
     assert "assets" in call["json"]["query"]
     assert "column_values" in call["json"]["query"]
+    assert "group { id title }" in call["json"]["query"]
 
 
 def test_postcode_loader_returns_live_typed_dropdown_settings() -> None:
@@ -221,6 +222,7 @@ def test_publication_loader_requests_revision_inputs_and_typed_values() -> None:
         ],
     }
     assert "assets" in call["json"]["query"]
+    assert "group { id title }" in call["json"]["query"]
     assert "... on DropdownValue" in call["json"]["query"]
     assert "... on BoardRelationValue" in call["json"]["query"]
     assert "linked_item_ids" in call["json"]["query"]

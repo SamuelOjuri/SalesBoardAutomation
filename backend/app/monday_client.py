@@ -130,6 +130,7 @@ class MondayClient:
                     id
                     state
                     board { id }
+                    group { id title }
                     assets {
                         id
                         name
@@ -173,6 +174,7 @@ class MondayClient:
                     id
                     state
                     board { id }
+                    group { id title }
                     assets {
                         id
                         name

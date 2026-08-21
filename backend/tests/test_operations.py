@@ -85,6 +85,7 @@ class InactiveMonday:
             "id": item_id,
             "state": "archived",
             "board": {"id": str(BOARD_CONTRACT.sales_board_id)},
+            "group": {"id": "topics", "title": "Outstanding Emails"},
             "assets": [],
             "column_values": [
                 {

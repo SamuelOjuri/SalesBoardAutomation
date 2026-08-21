@@ -8,12 +8,13 @@ from typing import Any
 
 import pytest
 
-from app.config import BOARD_CONTRACT
+from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
 from app.input_revision import EmailAssetIdentity, build_input_manifest
 from app.models import (
     ProcessingItem,
     ProcessingItemState,
+    ProcessingAudit,
     ProcessingJob,
     ProcessingJobStage,
     ProcessingJobStatus,
@@ -52,11 +53,16 @@ def identity(content: bytes, asset_id: str = "10") -> EmailAssetIdentity:
     )
 
 
-def sales_item(asset: EmailAssetIdentity) -> dict[str, Any]:
+def sales_item(
+    asset: EmailAssetIdentity,
+    *,
+    group_id: str = "topics",
+) -> dict[str, Any]:
     return {
         "id": "42",
         "state": "active",
         "board": {"id": str(BOARD_CONTRACT.sales_board_id)},
+        "group": {"id": group_id, "title": "Test Group"},
         "assets": [
             {
                 "id": asset.asset_id,
@@ -241,6 +247,8 @@ def dependencies(
     monday: FakeMonday,
     postcode_client: FakePostcodeClient,
     accounts_client: FlakyAccountsClient,
+    *,
+    excluded_group_ids: tuple[str, ...] = (),
 ) -> PipelineDependencies:
     return PipelineDependencies(
         monday=monday,
@@ -252,6 +260,7 @@ def dependencies(
         ),
         publication_gate=PublicationGate(),
         internal_email_domains=("taperedplus.co.uk",),
+        excluded_group_ids=excluded_group_ids,
     )
 
 
@@ -379,6 +388,49 @@ def test_changed_authoritative_input_cancels_and_queues_successor(database) -> N
         assert jobs[1].trigger_type == "input_supersession"
         assert item.latest_input_revision == jobs[1].input_revision
         assert monday.download_count == 0
+
+
+def test_excluded_group_cancels_queued_job_before_processing(database) -> None:
+    content = eml_bytes()
+    asset = identity(content)
+    job = add_claimed_job(database, asset)
+    excluded_group_id = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+    monday = FakeMonday(
+        sales_item(asset, group_id=excluded_group_id),
+        content,
+    )
+    accounts_client = FlakyAccountsClient()
+
+    outcome = run_pipeline_job(
+        database,
+        job.id,
+        worker_id="worker-a",
+        dependencies=dependencies(
+            monday,
+            FakePostcodeClient(),
+            accounts_client,
+            excluded_group_ids=(excluded_group_id,),
+        ),
+        mode="shadow",
+        now=NOW,
+    )
+
+    with database() as session:
+        cancelled = session.get(ProcessingJob, job.id)
+        audit = (
+            session.query(ProcessingAudit)
+            .filter_by(job_id=job.id, event_type="group_exclusion")
+            .one()
+        )
+        assert outcome == "superseded"
+        assert cancelled is not None
+        assert cancelled.status == ProcessingJobStatus.CANCELLED.value
+        assert cancelled.last_error == "GroupExcluded"
+        assert cancelled.item.state == ProcessingItemState.INELIGIBLE.value
+        assert audit.outcome == "excluded_group"
+        assert audit.details_json["groupId"] == excluded_group_id
+        assert monday.download_count == 0
+        assert accounts_client.page_calls == 0
 
 
 @pytest.mark.parametrize(

@@ -50,6 +50,7 @@ class EmailAsset:
 class SalesItemSnapshot:
     board_id: str
     item_id: str
+    group_id: str
     active: bool
     email_assets: tuple[EmailAsset, ...]
 
@@ -91,6 +92,8 @@ def parse_sales_item_snapshot(
     item_id = _positive_decimal_id(raw_item.get("id"), "item ID")
     board = _mapping(raw_item.get("board"), "item board")
     board_id = _positive_decimal_id(board.get("id"), "board ID")
+    group = _mapping(raw_item.get("group"), "item group")
+    group_id = _nonempty_id(group.get("id"), "group ID")
     state = raw_item.get("state")
     if not isinstance(state, str):
         raise IntakeContractError("Monday item state is missing")
@@ -147,6 +150,7 @@ def parse_sales_item_snapshot(
     return SalesItemSnapshot(
         board_id=board_id,
         item_id=item_id,
+        group_id=group_id,
         active=state.casefold() == "active",
         email_assets=tuple(
             sorted(email_assets, key=lambda asset: int(asset.identity.asset_id))
@@ -161,8 +165,11 @@ def queue_sales_item_snapshot(
     webhook_event_id: uuid.UUID | None = None,
     pipeline_version: str,
     trigger_type: str = "webhook_email",
+    excluded_group_ids: Sequence[str] = (),
     now: datetime | None = None,
 ) -> IntakeQueueResult:
+    if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):
+        raise ValueError("Sales item belongs to an excluded group")
     if not snapshot.active:
         raise ValueError("only active Sales items can be queued")
     if not snapshot.email_assets:
@@ -256,6 +263,13 @@ def queue_sales_item_snapshot(
         pipeline_version=pipeline_version,
     )
     return IntakeQueueResult(item, job, outcome, created_job)
+
+
+def is_excluded_sales_group(
+    group_id: str,
+    excluded_group_ids: Sequence[str],
+) -> bool:
+    return group_id in {str(value).strip() for value in excluded_group_ids}
 
 
 @contextmanager
@@ -384,6 +398,15 @@ def _positive_decimal_id(value: object, field_name: str) -> str:
     if not normalized.isdecimal() or int(normalized) <= 0:
         raise IntakeContractError(f"Monday {field_name} is malformed")
     return str(int(normalized))
+
+
+def _nonempty_id(value: object, field_name: str) -> str:
+    if value is None or isinstance(value, bool):
+        raise IntakeContractError(f"Monday {field_name} is missing")
+    normalized = str(value).strip()
+    if not normalized:
+        raise IntakeContractError(f"Monday {field_name} is malformed")
+    return normalized
 
 
 def _mapping(value: object, field_name: str) -> Mapping[str, Any]:

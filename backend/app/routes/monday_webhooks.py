@@ -22,6 +22,7 @@ from app.models import WebhookEvent, WebhookEventStatus
 from app.monday_client import MondayAPIError, MondayTransientError
 from app.services.intake import (
     IntakeContractError,
+    is_excluded_sales_group,
     parse_sales_item_snapshot,
     queue_sales_item_snapshot,
 )
@@ -155,6 +156,12 @@ def monday_webhook(
             return _event_response(event, status="ignored", reason="board_not_managed")
         if snapshot.item_id != normalized.item_id:
             raise IntakeContractError("Monday returned the wrong Sales item")
+        if is_excluded_sales_group(
+            snapshot.group_id,
+            settings.processing_excluded_group_ids,
+        ):
+            _finish_event(request, event.id)
+            return _event_response(event, status="ignored", reason="group_excluded")
         if not snapshot.active:
             _finish_event(request, event.id)
             return _event_response(event, status="ignored", reason="item_not_active")
@@ -168,6 +175,7 @@ def monday_webhook(
                 snapshot,
                 webhook_event_id=event.id,
                 pipeline_version=settings.processing_pipeline_version,
+                excluded_group_ids=settings.processing_excluded_group_ids,
             )
             event_record = session.get(WebhookEvent, event.id)
             if event_record is None:
