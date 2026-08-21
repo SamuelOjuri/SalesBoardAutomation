@@ -274,7 +274,16 @@ def test_webhook_rejects_insecure_or_unauthenticated_requests(
     assert unauthenticated.status_code == 401
 
 
-def test_webhook_accepts_a_valid_expiring_hs256_token(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "authorization_style",
+    [
+        pytest.param("raw", id="raw-jwt"),
+        pytest.param("bearer", id="bearer-jwt"),
+    ],
+)
+def test_webhook_accepts_a_valid_expiring_hs256_token(
+    tmp_path: Path, authorization_style: str
+) -> None:
     engine = create_database_engine(
         f"sqlite+pysqlite:///{(tmp_path / 'jwt-webhooks.db').as_posix()}"
     )
@@ -295,10 +304,11 @@ def test_webhook_accepts_a_valid_expiring_hs256_token(tmp_path: Path) -> None:
         signing_secret,
         algorithm="HS256",
     )
+    authorization = token if authorization_style == "raw" else f"Bearer {token}"
     try:
         response = post_requests(
             application,
-            [(webhook_payload(), {"Authorization": f"Bearer {token}"})],
+            [(webhook_payload(), {"Authorization": authorization})],
         )[0]
         assert response.status_code == 200
         assert response.json()["status"] == "queued"

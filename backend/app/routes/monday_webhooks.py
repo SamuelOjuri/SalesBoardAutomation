@@ -215,12 +215,20 @@ def _verify_authorization(
     signing_secret = settings.monday_signing_secret
     if signing_secret is None or authorization is None:
         raise HTTPException(status_code=401, detail="Invalid Monday webhook authorization")
-    scheme, separator, token = authorization.partition(" ")
-    if not separator or scheme.casefold() != "bearer" or not token.strip():
+
+    token = authorization.strip()
+    scheme, separator, credentials = token.partition(" ")
+    if separator:
+        if scheme.casefold() != "bearer" or not credentials.strip():
+            raise HTTPException(
+                status_code=401, detail="Invalid Monday webhook authorization"
+            )
+        token = credentials.strip()
+    if not token:
         raise HTTPException(status_code=401, detail="Invalid Monday webhook authorization")
     try:
         jwt.decode(
-            token.strip(),
+            token,
             signing_secret.get_secret_value(),
             algorithms=["HS256"],
             options={"require": ["exp"], "verify_aud": False},
