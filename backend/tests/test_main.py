@@ -4,7 +4,11 @@ from typing import Any
 import httpx
 from fastapi import FastAPI
 
-from app.config import BOARD_CONTRACT, Settings
+from app.config import (
+    BOARD_CONTRACT,
+    Settings,
+    build_processing_pipeline_version,
+)
 from app.database import create_database_engine
 from app.main import create_app
 
@@ -28,6 +32,9 @@ def runtime_settings() -> Settings:
         monday_webhook_shared_secret="shared-secret",
         gemini_api_key="gemini-key",
         gemini_model="gemini-test-model",
+        processing_pipeline_version=build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
     )
 
 

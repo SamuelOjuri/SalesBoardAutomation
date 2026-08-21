@@ -52,10 +52,26 @@ def test_extract_parameters_uses_strict_model_result() -> None:
     }
 
 
-def test_model_output_rejects_unexpected_fields() -> None:
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("board_id", 5_100_711_564),
+        ("item_id", "1953164969"),
+        ("column_id", "board_relation_mm64107r"),
+        ("mutation_payload", {"item_ids": [1953164969]}),
+    ],
+)
+def test_model_output_cannot_supply_monday_control_fields(
+    field_name: str,
+    field_value: object,
+) -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         DesignParameterExtraction.model_validate(
-            {"post_code": "WA4 6NL", "item_id": "1953164969"}
+            {
+                "post_code": "WA4 6NL",
+                "company": "Example Roofing",
+                field_name: field_value,
+            }
         )
 
 

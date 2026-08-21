@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "sanitized": true,
+  "reviewed_on": "2026-08-21",
+  "review_status": "manually_reviewed",
+  "notes": "Synthetic content based on representative enquiry patterns. Reserved example domains are used throughout; no production email content is present.",
+  "cases": [
+    {
+      "id": "external_sender_unique_domain",
+      "email": {
+        "from": "Avery Stone <avery@northstar.example.com>",
+        "to": "sales@taperedplus.co.uk",
+        "subject": "Northstar project quotation",
+        "body": "Please quote for the roofing works at 18 Example Way, Warrington, WA4 6NL. Our office correspondence address is M1 1AA."
+      },
+      "model_output": {
+        "post_code": "WA4 6NL",
+        "company": "Northstar Roofing Ltd"
+      },
+      "accounts": [
+        {
+          "item_id": "1001",
+          "name": "Northstar Roofing Limited",
+          "active": true,
+          "email_domain": "northstar.example.com",
+          "duplicate_label_ids": []
+        },
+        {
+          "item_id": "1002",
+          "name": "Southline Construction",
+          "active": true,
+          "email_domain": "southline.example.net",
+          "duplicate_label_ids": []
+        }
+      ],
+      "expected": {
+        "postcode_area": "WA",
+        "postcode_label_id": 115,
+        "requester_domain": "example.com",
+        "requester_source": "top_level_sender",
+        "resolution": "matched",
+        "account_item_id": "1001",
+        "reason": "unique_domain",
+        "domain_candidate_ids": ["1001"],
+        "name_candidate_ids": ["1001"]
+      }
+    },
+    {
+      "id": "internal_forward_unique_domain",
+      "email": {
+        "from": "Estimating <estimating@taperedplus.co.uk>",
+        "to": "sales@taperedplus.co.uk",
+        "subject": "Fwd: Harbour project",
+        "body": "Please review the latest enquiry.\n\n----- Forwarded message -----\nFrom: Morgan Reed <morgan@harbour.example.net>\nSent: 21 August 2026 09:15\nTo: Estimating <estimating@taperedplus.co.uk>\nSubject: Harbour project\n\nThe project location is EC1A 1BB. An earlier correspondence address was WA4 6NL."
+      },
+      "model_output": {
+        "post_code": "EC1A 1BB",
+        "company": "Harbour Envelope PLC"
+      },
+      "accounts": [
+        {
+          "item_id": "2001",
+          "name": "Harbour Envelope PLC",
+          "active": true,
+          "email_domain": "harbour.example.net",
+          "duplicate_label_ids": []
+        }
+      ],
+      "expected": {
+        "postcode_area": "EC",
+        "postcode_label_id": 35,
+        "requester_domain": "example.net",
+        "requester_source": "forwarded_sender",
+        "resolution": "matched",
+        "account_item_id": "2001",
+        "reason": "unique_domain",
+        "domain_candidate_ids": ["2001"],
+        "name_candidate_ids": ["2001"]
+      }
+    },
+    {
+      "id": "ambiguous_shared_domain",
+      "email": {
+        "from": "Taylor Green <taylor@east.example.org>",
+        "to": "sales@taperedplus.co.uk",
+        "subject": "City centre quotation",
+        "body": "Please price the project works at B1 1AA."
+      },
+      "model_output": {
+        "post_code": "B1 1AA",
+        "company": null
+      },
+      "accounts": [
+        {
+          "item_id": "3001",
+          "name": "East Example Group",
+          "active": true,
+          "email_domain": "east.example.org",
+          "duplicate_label_ids": []
+        },
+        {
+          "item_id": "3002",
+          "name": "West Example Group",
+          "active": true,
+          "email_domain": "west.example.org",
+          "duplicate_label_ids": []
+        }
+      ],
+      "expected": {
+        "postcode_area": "B",
+        "postcode_label_id": 3,
+        "requester_domain": "example.org",
+        "requester_source": "top_level_sender",
+        "resolution": "unresolved",
+        "account_item_id": null,
+        "reason": "not_found_or_ambiguous",
+        "domain_candidate_ids": ["3001", "3002"],
+        "name_candidate_ids": []
+      }
+    },
+    {
+      "id": "flagged_duplicate_filtered_before_name_match",
+      "email": {
+        "from": "Casey Morgan <casey@gmail.com>",
+        "to": "sales@taperedplus.co.uk",
+        "subject": "Kingsgate quotation",
+        "body": "Please quote the project at wa46nl."
+      },
+      "model_output": {
+        "post_code": "wa46nl",
+        "company": "Kingsgate Construction"
+      },
+      "accounts": [
+        {
+          "item_id": "1953164968",
+          "name": "Kingsgate Construction Ltd",
+          "active": true,
+          "email_domain": null,
+          "duplicate_label_ids": [1]
+        },
+        {
+          "item_id": "1953164969",
+          "name": "Kingsgate Construction Limited",
+          "active": true,
+          "email_domain": null,
+          "duplicate_label_ids": []
+        }
+      ],
+      "expected": {
+        "postcode_area": "WA",
+        "postcode_label_id": 115,
+        "requester_domain": null,
+        "requester_source": "top_level_sender",
+        "resolution": "matched",
+        "account_item_id": "1953164969",
+        "reason": "unique_exact_name",
+        "domain_candidate_ids": [],
+        "name_candidate_ids": ["1953164969"]
+      }
+    },
+    {
+      "id": "similar_name_never_auto_links",
+      "email": {
+        "from": "Jordan Lee <jordan@outlook.com>",
+        "to": "sales@taperedplus.co.uk",
+        "subject": "Project location not confirmed",
+        "body": "Please prepare an initial budget. The project postcode will follow."
+      },
+      "model_output": {
+        "post_code": null,
+        "company": "Kingsgates Construction"
+      },
+      "accounts": [
+        {
+          "item_id": "5001",
+          "name": "Kingsgate Construction",
+          "active": true,
+          "email_domain": null,
+          "duplicate_label_ids": []
+        }
+      ],
+      "expected": {
+        "postcode_area": null,
+        "postcode_label_id": null,
+        "requester_domain": null,
+        "requester_source": "top_level_sender",
+        "resolution": "unresolved",
+        "account_item_id": null,
+        "reason": "not_found_or_ambiguous",
+        "domain_candidate_ids": [],
+        "name_candidate_ids": []
+      }
+    }
+  ]
+}

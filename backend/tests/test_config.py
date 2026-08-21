@@ -2,9 +2,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import (
+    ACCOUNT_MATCHING_REVISION,
     BOARD_CONTRACT,
     DEFAULT_EXCLUDED_SALES_GROUP_IDS,
+    POSTCODE_EXTRACTION_REVISION,
     Settings,
+    build_processing_pipeline_version,
 )
 
 
@@ -15,6 +18,9 @@ def settings_values() -> dict[str, object]:
         "monday_webhook_shared_secret": "shared-secret",
         "gemini_api_key": "gemini-key",
         "gemini_model": "gemini-test-model",
+        "processing_pipeline_version": build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
     }
 
 
@@ -40,6 +46,40 @@ def test_settings_normalise_phase_one_configuration() -> None:
     assert settings.internal_email_domains == ["taperedplus.co.uk", "example.com"]
     assert settings.sales_board_id == BOARD_CONTRACT.sales_board_id
     assert settings.accounts_board_id == BOARD_CONTRACT.accounts_board_id
+    assert settings.processing_pipeline_version == build_processing_pipeline_version(
+        "gemini-test-model"
+    )
+
+
+def test_pipeline_version_changes_with_model_and_behavior_revisions() -> None:
+    baseline = build_processing_pipeline_version("gemini-2.5-flash-001")
+
+    assert "gemini=gemini-2.5-flash-001" in baseline
+    assert f"extraction={POSTCODE_EXTRACTION_REVISION}" in baseline
+    assert f"matching={ACCOUNT_MATCHING_REVISION}" in baseline
+    assert build_processing_pipeline_version("gemini-2.5-flash-002") != baseline
+    assert (
+        build_processing_pipeline_version(
+            "gemini-2.5-flash-001",
+            extraction_revision="postcode-extraction-v2",
+        )
+        != baseline
+    )
+    assert (
+        build_processing_pipeline_version(
+            "gemini-2.5-flash-001",
+            account_matching_revision="account-matching-v2",
+        )
+        != baseline
+    )
+
+
+def test_settings_reject_stale_pipeline_version() -> None:
+    values = settings_values()
+    values["processing_pipeline_version"] = "sales-requester-v1"
+
+    with pytest.raises(ValidationError, match="must match the pinned model"):
+        Settings(_env_file=None, **values)
 
 
 def test_completed_folder_is_excluded_by_default() -> None:

@@ -221,6 +221,23 @@ def test_existing_values_are_reported_and_never_overwritten() -> None:
     assert client.mutations == []
 
 
+def test_missing_postcode_never_clears_an_existing_value() -> None:
+    client = FakePublicationClient([_sales_item(postcode_ids=(115,))])
+
+    result = publish_sales_item(
+        client=client,
+        publication_gate=_enabled_gate(),
+        item_id="42",
+        input_revision=INPUT_REVISION,
+        postcode_label_id=None,
+    )
+
+    assert result.mutation_attempted is False
+    assert result.postcode.outcome == "no_candidate"
+    assert result.postcode.existing_ids == ("115",)
+    assert client.mutations == []
+
+
 def test_ineligible_account_does_not_block_postcode_publication() -> None:
     client = FakePublicationClient(
         [_sales_item(), _sales_item(postcode_ids=(115,))]

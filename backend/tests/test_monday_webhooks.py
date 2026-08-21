@@ -10,7 +10,12 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
 
-from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS, Settings
+from app.config import (
+    BOARD_CONTRACT,
+    DEFAULT_EXCLUDED_SALES_GROUP_IDS,
+    Settings,
+    build_processing_pipeline_version,
+)
 from app.database import Base, create_database_engine, create_session_factory
 from app.main import create_app
 from app.models import ProcessingJob, WebhookEvent, WebhookEventStatus
@@ -34,6 +39,9 @@ def runtime_settings(**updates: object) -> Settings:
         "monday_webhook_shared_secret": "shared-secret",
         "gemini_api_key": "gemini-key",
         "gemini_model": "gemini-test-model",
+        "processing_pipeline_version": build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
     }
     values.update(updates)
     return Settings(_env_file=None, **values)

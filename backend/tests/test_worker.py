@@ -1,8 +1,11 @@
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 
+from app.config import Settings, build_processing_pipeline_version
 from app.database import Base, create_database_engine, create_session_factory
 from app.models import (
     ProcessingAudit,
@@ -19,6 +22,7 @@ from app.services.worker import (
     recover_stale_jobs,
     retry_or_fail_job,
 )
+from app.worker import WorkerRuntime, process_next_job
 
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
@@ -155,6 +159,65 @@ def test_failure_preserves_stage_and_schedules_exponential_retry(
         assert job.last_error == "TimeoutError"
         assert job.locked_by is None
         assert "sensitive" not in str(job.last_error)
+
+
+def test_worker_logs_only_error_type_not_sensitive_message(
+    session_factory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensitive_marker = "PRIVATE-EMAIL-CONTENT-92C1"
+    with session_factory() as session:
+        job = add_job(session, item_id="351")
+        job_id = job.id
+        session.commit()
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://user:password@localhost/sales",
+        monday_ingestion_access_token="token",
+        monday_webhook_shared_secret="shared-secret",
+        gemini_api_key="gemini-key",
+        gemini_model="gemini-test-model",
+        processing_pipeline_version=build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
+        processing_mode="shadow",
+        worker_heartbeat_interval_seconds=1,
+        worker_lease_timeout_seconds=10,
+    )
+    runtime = WorkerRuntime(
+        settings=settings,
+        engine=cast(Any, session_factory.kw["bind"]),
+        session_factory=session_factory,
+        monday_client=cast(Any, None),
+        dependencies=cast(Any, None),
+        worker_id="worker-sensitive-log-test",
+    )
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError(sensitive_marker)
+
+    caplog.set_level(logging.INFO, logger="app.worker")
+
+    assert process_next_job(
+        runtime,
+        pipeline_runner=fail_pipeline,
+        now=NOW,
+    )
+
+    with session_factory() as session:
+        failed = session.get(ProcessingJob, job_id)
+        assert failed is not None
+        assert failed.last_error == "RuntimeError"
+    failure_record = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "processing job failed"
+    )
+    assert failure_record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert sensitive_marker not in caplog.text
+    assert sensitive_marker not in str(failure_record.__dict__)
 
 
 def test_stale_worker_recovery_retries_or_exhausts_job(session_factory) -> None:

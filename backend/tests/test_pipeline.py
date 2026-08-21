@@ -34,13 +34,15 @@ from app.services.worker import claim_next_job, retry_or_fail_job
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
 
 
-def eml_bytes() -> bytes:
+def eml_bytes(
+    body: str = "Please quote for the project at WA4 6NL.",
+) -> bytes:
     message = EmailMessage()
     message["From"] = "Estimator <requester@acme.co.uk>"
     message["To"] = "sales@taperedplus.co.uk"
     message["Subject"] = "Project quote"
     message["Date"] = "Fri, 21 Aug 2026 11:00:00 +0100"
-    message.set_content("Please quote for the project at WA4 6NL.")
+    message.set_content(body)
     return message.as_bytes()
 
 
@@ -296,6 +298,47 @@ def test_shadow_pipeline_completes_without_monday_mutation(database) -> None:
         assert item.postcode_result_json["labelId"] == 115
         assert item.account_match_json["accountItemId"] == "99"
         assert monday.mutations == []
+
+
+def test_pipeline_checkpoints_do_not_persist_raw_email_content(database) -> None:
+    sensitive_marker = "PRIVATE-ENQUIRY-CONTENT-7F2A"
+    content = eml_bytes(
+        f"Please quote for the project at WA4 6NL. {sensitive_marker}"
+    )
+    asset = identity(content)
+    job = add_claimed_job(database, asset)
+    monday = FakeMonday(sales_item(asset), content)
+
+    outcome = run_pipeline_job(
+        database,
+        job.id,
+        worker_id="worker-a",
+        dependencies=dependencies(
+            monday,
+            FakePostcodeClient(),
+            FlakyAccountsClient(),
+        ),
+        mode="shadow",
+        now=NOW,
+    )
+
+    with database() as session:
+        completed = session.get(ProcessingJob, job.id)
+        item = session.query(ProcessingItem).one()
+        audits = session.query(ProcessingAudit).filter_by(job_id=job.id).all()
+        assert completed is not None
+        persisted = json.dumps(
+            {
+                "job": completed.result_json,
+                "postcode": item.postcode_result_json,
+                "account": item.account_match_json,
+                "audits": [audit.details_json for audit in audits],
+            },
+            sort_keys=True,
+        )
+
+    assert outcome == "shadow_completed"
+    assert sensitive_marker not in persisted
 
 
 def test_retry_resumes_at_saved_matching_stage(database) -> None:

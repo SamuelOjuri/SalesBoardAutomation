@@ -10,8 +10,40 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
-PROCESSING_PIPELINE_VERSION = "sales-requester-v1"
+PROCESSING_PIPELINE_RELEASE = "sales-requester-v1"
+POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v1"
+POSTCODE_NORMALIZATION_REVISION = "postcode-area-v1"
+REQUESTER_IDENTITY_REVISION = "requester-identity-v1"
+ACCOUNT_MATCHING_REVISION = "account-matching-v1"
 DEFAULT_EXCLUDED_SALES_GROUP_IDS = ("group_mm5eqjq4",)
+
+
+def build_processing_pipeline_version(
+    gemini_model: str,
+    *,
+    extraction_revision: str = POSTCODE_EXTRACTION_REVISION,
+    normalization_revision: str = POSTCODE_NORMALIZATION_REVISION,
+    requester_identity_revision: str = REQUESTER_IDENTITY_REVISION,
+    account_matching_revision: str = ACCOUNT_MATCHING_REVISION,
+) -> str:
+    """Build the immutable identity of every result-affecting pipeline part."""
+
+    components = {
+        "gemini": gemini_model,
+        "extraction": extraction_revision,
+        "normalization": normalization_revision,
+        "requester": requester_identity_revision,
+        "matching": account_matching_revision,
+    }
+    normalized = {
+        name: str(value).strip() for name, value in components.items()
+    }
+    if any(not value for value in normalized.values()):
+        raise ValueError("pipeline version components must not be empty")
+    component_version = "|".join(
+        f"{name}={value}" for name, value in normalized.items()
+    )
+    return f"{PROCESSING_PIPELINE_RELEASE}|{component_version}"
 
 
 @dataclass(frozen=True)
@@ -181,7 +213,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr
     gemini_model: str
-    processing_pipeline_version: str = PROCESSING_PIPELINE_VERSION
+    processing_pipeline_version: str = ""
     processing_mode: Literal["off", "shadow", "allowlist", "enabled"] = "off"
     processing_allowlist_item_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list
@@ -238,9 +270,7 @@ class Settings(BaseSettings):
         secret = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
         return secret.strip() or None
 
-    @field_validator(
-        "monday_api_url", "gemini_model", "processing_pipeline_version", mode="before"
-    )
+    @field_validator("monday_api_url", "gemini_model", mode="before")
     @classmethod
     def _require_nonempty_value(cls, value: object) -> str:
         normalised = str(value).strip()
@@ -317,6 +347,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_authentication_and_mode(self) -> "Settings":
+        expected_pipeline_version = build_processing_pipeline_version(
+            self.gemini_model
+        )
+        configured_pipeline_version = self.processing_pipeline_version.strip()
+        if (
+            configured_pipeline_version
+            and configured_pipeline_version != expected_pipeline_version
+        ):
+            raise ValueError(
+                "processing_pipeline_version must match the pinned model and "
+                f"behavior revisions: {expected_pipeline_version}"
+            )
+        self.processing_pipeline_version = expected_pipeline_version
         if self.monday_signing_secret is None and self.monday_webhook_shared_secret is None:
             raise ValueError(
                 "monday_signing_secret or monday_webhook_shared_secret is required"

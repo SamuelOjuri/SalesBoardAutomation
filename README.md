@@ -1,8 +1,8 @@
 # Sales Board Automation
 
-The backend implements the frozen Phase 0 safety contract through the Phase 7
-durable worker and operator controls. The FastAPI webhook and background worker
-run as separate processes against the same PostgreSQL queue.
+The backend implements the frozen Phase 0 safety contract through the Phase 8
+validation and security gates. The FastAPI webhook and background worker run
+as separate processes against the same PostgreSQL queue.
 
 ## Backend foundation
 
@@ -121,8 +121,13 @@ unmapped postcodes produce no Monday value.
 
 Extraction results contain only the area, resolved label ID/value, normalized
 company evidence, input asset IDs, and an extracted-text SHA-256. Raw email and
-attachment content is not returned or logged. The default pipeline identity is
-`sales-requester-v1`.
+attachment content is not returned or logged. Every job's pipeline identity is
+derived from the release, exact `GEMINI_MODEL`, postcode extraction and
+normalization revisions, requester-identity revision, and Account matching
+revision. If `PROCESSING_PIPELINE_VERSION` is set, it must exactly match that
+canonical identity or startup fails. Bump the corresponding revision constant
+in `backend/app/config.py` whenever a prompt, response schema, normalization,
+requester rule, or matching rule changes.
 
 ## Requester identity and Accounts index
 
@@ -214,6 +219,23 @@ cd backend && python -m app.worker
 Phase 1 already created all stage, lease, heartbeat, retry, result, and audit
 columns used by the worker, so Phase 7 does not require another migration.
 
+## Validation and security
+
+`backend/tests/fixtures/phase8_golden_enquiries.json` is a manually reviewed,
+sanitized corpus of representative enquiry patterns. It contains no production
+email content and uses reserved example domains. The fixture-driven tests run
+the real MIME parser, requester extraction, postcode normalization and live
+label mapping, duplicate-safe Account matching, ambiguity handling, and fuzzy
+non-matching decisions. Approved links must match exactly; every reviewed
+non-link must remain unresolved.
+
+The Phase 8 regression suite also proves that temporary email files are removed
+on exceptional exits, raw email content is absent from persisted checkpoints
+and worker logs, missing postcode output cannot clear a human value, shadow
+processing performs no Monday mutation, and model output containing board IDs,
+item IDs, column IDs, or mutation payloads is rejected by the strict response
+schema.
+
 Operator commands use the same queue and identity checks:
 
 ```powershell
@@ -249,7 +271,7 @@ Check service and publication-gate status at `http://127.0.0.1:8000/health`.
 
 ## Tests
 
-Run the complete Phase 0 through Phase 7 suite from the repository root:
+Run the complete Phase 0 through Phase 8 suite from the repository root:
 
 ```powershell
 python -m pytest -q
