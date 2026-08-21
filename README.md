@@ -1,9 +1,8 @@
 # Sales Board Automation
 
-The backend implements the frozen Phase 0 safety contract, the durable Phase 1
-service boundary, authenticated Phase 2 Monday intake, and Phase 3 email and
-postcode extraction. It does not yet match Accounts, run the durable worker,
-or write to Monday; those behaviors belong to later phases.
+The backend implements the frozen Phase 0 safety contract through Phase 6 safe
+Monday publication. It does not yet run the Phase 7 durable worker or invoke
+the analysis and publication services from a background process.
 
 ## Backend foundation
 
@@ -136,7 +135,32 @@ domain evidence.
 Monday column values, including the final page whose cursor is null. Only
 Duplicate label ID `1` excludes an item, while null and empty values remain
 eligible. Complete indexes are cached for five minutes. A selected Account is
-always re-fetched and must still be active and unflagged before publication.
+always re-fetched, must belong to the configured Accounts board, and must still
+be active and unflagged before publication.
+
+## Safe Monday publication
+
+`backend/app/services/publication.py` is the Phase 6 write boundary. It
+re-fetches the Sales item with the current Email File asset metadata and typed
+`DropdownValue.values` and `BoardRelationValue.linked_item_ids`. The service
+recomputes the immutable input revision and rejects inactive, moved, or changed
+items before any mutation.
+
+Postcode and Accounts are evaluated independently. Empty columns with valid
+candidates are included in one selective `change_multiple_column_values`
+mutation. Intended values already present are reported without a write, while
+different existing values are preserved and returned as conflicts. An Account
+candidate is omitted when its immediate revalidation finds it inactive,
+duplicate-flagged, missing, or otherwise ineligible; a valid Postcode can still
+be published in that case.
+
+`MondayClient.change_sales_item_column_values` permits only
+`dropdown_mm60y5x8` and `board_relation_mm64107r`, validates their complete
+value shapes, and performs one HTTP attempt. The publication service enforces
+the startup schema gate immediately before that attempt and post-reads the
+Sales item after both successful and network-ambiguous mutations. An ambiguous
+result is accepted only when the authoritative post-read confirms it;
+otherwise the transient error is raised for a later worker retry.
 
 The application remains available when schema loading fails, but `/health`
 reports `publication_enabled: false` and the gate's issue codes. Alembic is the
@@ -160,7 +184,7 @@ Check service and publication-gate status at `http://127.0.0.1:8000/health`.
 
 ## Tests
 
-Run the complete Phase 0 through Phase 3 suite from the repository root:
+Run the complete Phase 0 through Phase 6 suite from the repository root:
 
 ```powershell
 python -m pytest -q

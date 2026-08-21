@@ -28,6 +28,7 @@ def _account(
         "id": item_id,
         "name": f"Account {item_id}",
         "state": state,
+        "board": {"id": str(BOARD_CONTRACT.accounts_board_id)},
         "column_values": [
             {
                 "id": BOARD_CONTRACT.account_email_domain_column_id,
@@ -139,6 +140,22 @@ def test_selected_account_is_refetched_and_must_still_be_eligible() -> None:
 
     assert service.revalidate_selected_account("42") is None
     assert client.item_calls == ["42"]
+
+
+def test_selected_account_revalidation_rejects_an_item_from_another_board() -> None:
+    selected_item = _account("42", duplicate_values=[])
+    selected_item["board"] = {"id": "999"}
+    client = FakeAccountsClient(
+        {None: {"cursor": None, "items": []}},
+        selected_item=selected_item,
+    )
+    service = AccountsIndexService(
+        client=client,
+        board_id=BOARD_CONTRACT.accounts_board_id,
+    )
+
+    with pytest.raises(AccountsContractError, match="wrong board"):
+        service.revalidate_selected_account("42")
 
 
 @pytest.mark.parametrize(

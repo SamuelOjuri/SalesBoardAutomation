@@ -222,6 +222,13 @@ class AccountsIndexService:
         raw_item = self._client.load_account_item(str(item_id))
         if raw_item is None:
             return None
+        board = raw_item.get("board")
+        if not isinstance(board, Mapping) or str(board.get("id")) != str(
+            self._board_id
+        ):
+            raise AccountsContractError(
+                "Monday returned the selected item from the wrong board"
+            )
         account = parse_account_item(raw_item)
         if account.item_id != str(item_id):
             raise AccountsContractError("Monday returned the wrong Account item")

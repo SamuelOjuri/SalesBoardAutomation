@@ -1,7 +1,9 @@
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import requests
 
 from app.config import BOARD_CONTRACT
@@ -196,6 +198,80 @@ def test_selected_account_loader_returns_none_when_item_disappears() -> None:
     assert client.load_account_item("42") is None
     assert fake_session.calls[0]["json"]["variables"]["item_ids"] == ["42"]
     assert "state" in fake_session.calls[0]["json"]["query"]
+
+
+def test_publication_loader_requests_revision_inputs_and_typed_values() -> None:
+    item = {"id": "42", "assets": [], "column_values": []}
+    fake_session = FakeSession({"data": {"items": [item]}})
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, fake_session),
+    )
+
+    assert client.load_sales_item_for_publication("42") == item
+
+    call = fake_session.calls[0]
+    assert call["json"]["variables"] == {
+        "item_ids": ["42"],
+        "column_ids": [
+            BOARD_CONTRACT.email_file_column_id,
+            BOARD_CONTRACT.postcode_column_id,
+            BOARD_CONTRACT.accounts_relation_column_id,
+        ],
+    }
+    assert "assets" in call["json"]["query"]
+    assert "... on DropdownValue" in call["json"]["query"]
+    assert "... on BoardRelationValue" in call["json"]["query"]
+    assert "linked_item_ids" in call["json"]["query"]
+
+
+def test_sales_mutation_is_selective_and_not_blindly_retried() -> None:
+    fake_session = FakeSession(
+        {"data": {"change_multiple_column_values": {"id": "42"}}}
+    )
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, fake_session),
+    )
+    values = {
+        BOARD_CONTRACT.postcode_column_id: {"ids": [115]},
+        BOARD_CONTRACT.accounts_relation_column_id: {"item_ids": [1953164969]},
+    }
+
+    client.change_sales_item_column_values(
+        BOARD_CONTRACT.sales_board_id,
+        "42",
+        values,
+    )
+
+    assert len(fake_session.calls) == 1
+    variables = fake_session.calls[0]["json"]["variables"]
+    assert variables["board_id"] == str(BOARD_CONTRACT.sales_board_id)
+    assert variables["item_id"] == "42"
+    assert json.loads(variables["column_values"]) == values
+
+
+def test_sales_mutation_rejects_non_allow_listed_columns_and_payloads() -> None:
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, FakeSession({})),
+    )
+
+    with pytest.raises(ValueError, match="non-allow-listed"):
+        client.change_sales_item_column_values(
+            BOARD_CONTRACT.sales_board_id,
+            "42",
+            {"model_supplied_column": {"ids": [1]}},
+        )
+    with pytest.raises(ValueError, match="one label ID"):
+        client.change_sales_item_column_values(
+            BOARD_CONTRACT.sales_board_id,
+            "42",
+            {BOARD_CONTRACT.postcode_column_id: {"ids": [115, 999]}},
+        )
 
 
 def test_asset_download_streams_and_validates_size_and_sha256(tmp_path: Path) -> None:

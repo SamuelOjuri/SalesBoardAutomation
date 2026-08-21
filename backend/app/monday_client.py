@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ _ACCOUNT_ITEM_FIELDS = """
     id
     name
     state
+    board { id }
     column_values(ids: $column_ids) {
         id
         type
@@ -38,6 +40,13 @@ _ACCOUNT_ITEM_FIELDS = """
         }
     }
 """
+
+_SALES_PUBLICATION_COLUMN_IDS = frozenset(
+    {
+        BOARD_CONTRACT.postcode_column_id,
+        BOARD_CONTRACT.accounts_relation_column_id,
+    }
+)
 
 
 class MondayAPIError(RuntimeError):
@@ -151,6 +160,127 @@ class MondayClient:
         if not isinstance(item, Mapping):
             raise MondayAPIError("Monday returned a malformed Sales item")
         return item
+
+    def load_sales_item_for_publication(
+        self, item_id: str
+    ) -> Mapping[str, Any]:
+        query = """
+            query SalesItemPublication(
+                $item_ids: [ID!]!,
+                $column_ids: [String!]!
+            ) {
+                items(ids: $item_ids) {
+                    id
+                    state
+                    board { id }
+                    assets {
+                        id
+                        name
+                        file_size
+                        created_at
+                        url
+                        public_url
+                    }
+                    column_values(ids: $column_ids) {
+                        id
+                        type
+                        value
+                        ... on DropdownValue {
+                            values {
+                                id
+                                label
+                            }
+                        }
+                        ... on BoardRelationValue {
+                            linked_item_ids
+                        }
+                    }
+                }
+            }
+        """
+        payload = self._execute(
+            query,
+            {
+                "item_ids": [str(item_id)],
+                "column_ids": [
+                    BOARD_CONTRACT.email_file_column_id,
+                    BOARD_CONTRACT.postcode_column_id,
+                    BOARD_CONTRACT.accounts_relation_column_id,
+                ],
+            },
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) != 1:
+            raise MondayAPIError("Monday returned an unexpected Sales item count")
+        item = items[0]
+        if not isinstance(item, Mapping):
+            raise MondayAPIError("Monday returned a malformed Sales item")
+        return item
+
+    def change_sales_item_column_values(
+        self,
+        board_id: int,
+        item_id: str,
+        column_values: Mapping[str, object],
+    ) -> None:
+        if board_id != BOARD_CONTRACT.sales_board_id:
+            raise ValueError("writes are restricted to the configured Sales board")
+        if not column_values:
+            raise ValueError("column_values must not be empty")
+        if not set(column_values).issubset(_SALES_PUBLICATION_COLUMN_IDS):
+            raise ValueError("column_values contains a non-allow-listed column")
+        self._validate_publication_values(column_values)
+
+        query = """
+            mutation ChangeSalesItemColumns(
+                $board_id: ID!,
+                $item_id: ID!,
+                $column_values: JSON!
+            ) {
+                change_multiple_column_values(
+                    board_id: $board_id,
+                    item_id: $item_id,
+                    column_values: $column_values
+                ) {
+                    id
+                }
+            }
+        """
+        payload = self._post_once(
+            query,
+            {
+                "board_id": str(board_id),
+                "item_id": str(item_id),
+                "column_values": json.dumps(
+                    column_values,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            },
+        )
+        changed_item = payload.get("change_multiple_column_values")
+        if not isinstance(changed_item, Mapping) or str(
+            changed_item.get("id", "")
+        ) != str(item_id):
+            raise MondayAPIError("Monday returned a malformed changed Sales item")
+
+    @staticmethod
+    def _validate_publication_values(
+        column_values: Mapping[str, object],
+    ) -> None:
+        postcode_value = column_values.get(BOARD_CONTRACT.postcode_column_id)
+        if postcode_value is not None and not _is_single_positive_id_value(
+            postcode_value, "ids"
+        ):
+            raise ValueError("Postcode publication value must contain one label ID")
+
+        accounts_value = column_values.get(
+            BOARD_CONTRACT.accounts_relation_column_id
+        )
+        if accounts_value is not None and not _is_single_positive_id_value(
+            accounts_value, "item_ids"
+        ):
+            raise ValueError("Accounts publication value must contain one item ID")
 
     def load_postcode_dropdown_column(self, board_id: int) -> Mapping[str, Any]:
         board = self.load_sales_board_schema(board_id)
@@ -406,3 +536,16 @@ class MondayClient:
     def close(self) -> None:
         if self._owns_session:
             self._session.close()
+
+
+def _is_single_positive_id_value(value: object, key: str) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {key}:
+        return False
+    identifiers = value.get(key)
+    if not isinstance(identifiers, list) or len(identifiers) != 1:
+        return False
+    identifier = identifiers[0]
+    if identifier is None or isinstance(identifier, bool):
+        return False
+    normalized = str(identifier).strip()
+    return normalized.isdecimal() and int(normalized) > 0
