@@ -280,11 +280,13 @@ def test_sales_mutation_rejects_non_allow_listed_columns_and_payloads() -> None:
 
 def test_asset_download_streams_and_validates_size_and_sha256(tmp_path: Path) -> None:
     content = b"From: requester@example.com\n"
-    fake_session = FakeDownloadSession(content)
+    api_session = FakeSession({})
+    asset_session = FakeDownloadSession(content)
     client = MondayClient(
         access_token="token",
         api_version="2026-07",
-        session=cast(requests.Session, fake_session),
+        session=cast(requests.Session, api_session),
+        asset_session=cast(requests.Session, asset_session),
     )
     destination = tmp_path / "asset.eml"
     expected_digest = hashlib.sha256(content).hexdigest()
@@ -298,5 +300,9 @@ def test_asset_download_streams_and_validates_size_and_sha256(tmp_path: Path) ->
 
     assert digest == expected_digest
     assert destination.read_bytes() == content
-    assert fake_session.response.closed is True
-    assert fake_session.calls[0]["stream"] is True
+    assert asset_session.response.closed is True
+    assert asset_session.calls[0]["stream"] is True
+    assert api_session.calls == []
+    assert api_session.headers["Authorization"] == "token"
+    assert "Authorization" not in asset_session.headers
+    assert "Authorization" not in asset_session.calls[0]["headers"]

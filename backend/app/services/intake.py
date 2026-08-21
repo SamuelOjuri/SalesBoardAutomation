@@ -439,10 +439,11 @@ def _timestamp(value: object) -> datetime:
 
 
 def _download_url(metadata: Mapping[str, Any]) -> str:
-    value = metadata.get("url") or metadata.get("public_url")
-    if not isinstance(value, str):
-        raise IntakeContractError("Monday asset download URL is missing")
+    value = metadata.get("public_url")
+    if not isinstance(value, str) or not value.strip():
+        raise IntakeContractError("Monday asset public download URL is missing")
+    value = value.strip()
     parsed = urlparse(value)
     if parsed.scheme.casefold() != "https" or not parsed.hostname:
-        raise IntakeContractError("Monday asset download URL must use HTTPS")
+        raise IntakeContractError("Monday asset public download URL must use HTTPS")
     return value

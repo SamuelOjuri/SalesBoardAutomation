@@ -67,9 +67,12 @@ class MondayClient:
         request_timeout_seconds: float = 30.0,
         max_attempts: int = 3,
         session: requests.Session | None = None,
+        asset_session: requests.Session | None = None,
     ) -> None:
         self._session = session or requests.Session()
         self._owns_session = session is None
+        self._asset_session = asset_session or requests.Session()
+        self._owns_asset_session = asset_session is None
         self._api_url = api_url
         self._request_timeout_seconds = request_timeout_seconds
         self._max_attempts = max_attempts
@@ -438,7 +441,7 @@ class MondayClient:
         expected_sha256: str | None,
     ) -> str:
         try:
-            response = self._session.get(
+            response = self._asset_session.get(
                 url,
                 headers={"Accept": "*/*"},
                 stream=True,
@@ -538,6 +541,8 @@ class MondayClient:
     def close(self) -> None:
         if self._owns_session:
             self._session.close()
+        if self._owns_asset_session:
+            self._asset_session.close()
 
 
 def _is_single_positive_id_value(value: object, key: str) -> bool:

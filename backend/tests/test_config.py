@@ -63,7 +63,7 @@ def test_pipeline_version_changes_with_model_and_behavior_revisions() -> None:
     assert (
         build_processing_pipeline_version(
             "gemini-2.5-flash-001",
-            extraction_revision="postcode-extraction-v2",
+            extraction_revision="postcode-extraction-v3",
         )
         != baseline
     )

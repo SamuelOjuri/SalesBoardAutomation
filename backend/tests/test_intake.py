@@ -29,14 +29,18 @@ def item_snapshot() -> dict[str, Any]:
                 "name": "notes.pdf",
                 "file_size": 20,
                 "created_at": "2026-08-19T09:30:00Z",
-                "url": "https://files.monday.com/notes.pdf",
+                "url": "https://auth.monday.com/notes.pdf",
+                "public_url": "https://files.monday.com/public/notes.pdf?token=one",
             },
             {
                 "id": "2",
                 "name": "request.EML",
                 "file_size": "12",
                 "created_at": "2026-08-19T09:31:00Z",
-                "url": "https://files.monday.com/request.eml",
+                "url": "https://auth.monday.com/request.eml",
+                "public_url": (
+                    "https://files.monday.com/public/request.eml?token=two"
+                ),
             },
         ],
         "column_values": [
@@ -59,6 +63,9 @@ def test_snapshot_uses_only_supported_email_file_members() -> None:
     assert snapshot.group_id == "topics"
     assert [asset.identity.asset_id for asset in snapshot.email_assets] == ["2"]
     assert snapshot.email_assets[0].identity.size_bytes == 12
+    assert snapshot.email_assets[0].download_url == (
+        "https://files.monday.com/public/request.eml?token=two"
+    )
 
 
 def test_snapshot_does_not_use_assets_outside_email_file_membership() -> None:
@@ -83,7 +90,8 @@ def test_snapshot_requires_an_authoritative_group() -> None:
     [
         ("file_size", None, "asset size"),
         ("created_at", "2026-08-19T09:31:00", "timezone"),
-        ("url", "http://files.monday.com/request.eml", "HTTPS"),
+        ("public_url", None, "public download URL is missing"),
+        ("public_url", "http://files.monday.com/request.eml", "HTTPS"),
     ],
 )
 def test_supported_asset_requires_complete_safe_metadata(

@@ -89,6 +89,7 @@ def intake_item(
                 "file_size": 12,
                 "created_at": "2026-08-19T09:30:00Z",
                 "url": "https://files.monday.com/request.eml",
+                "public_url": "https://files.monday.com/public/request.eml",
             }
         ],
         "column_values": [

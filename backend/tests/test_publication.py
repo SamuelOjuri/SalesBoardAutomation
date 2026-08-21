@@ -46,7 +46,7 @@ def _sales_item(
                 "file_size": asset.size_bytes,
                 "created_at": asset.created_at.isoformat(),
                 "url": "https://files.monday.com/request.eml",
-                "public_url": None,
+                "public_url": "https://files.monday.com/public/request.eml",
             }
         ],
         "column_values": [

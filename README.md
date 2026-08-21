@@ -92,8 +92,9 @@ job and records a supersession request without mutating that job's immutable
 input identity.
 
 `download_email_assets` provides the worker-facing download boundary. It uses
-authorized streamed downloads, checks the metadata size, computes SHA-256, and
-deletes the temporary directory on every exit path.
+the freshly fetched, time-limited `public_url` through a session that carries no
+Monday API credentials, checks the metadata size, computes SHA-256, and deletes
+the temporary directory on every exit path.
 
 ## Email and postcode extraction
 
