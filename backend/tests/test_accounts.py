@@ -342,6 +342,44 @@ def test_name_fallback_for_unmatched_business_domain_requires_opt_in() -> None:
     assert allowed.reason == "unique_exact_name"
 
 
+def test_verified_account_domain_alias_requires_exact_name_agreement() -> None:
+    index = AccountsIndex(
+        (
+            _record("1661824807", "AccuRoof", domain="accuroof.co.uk"),
+            _record("20", "Other SIG Company", domain="other.example"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="sigplc.com", company="AccuRoof"),
+        account_domain_aliases={"1661824807": ("sigplc.com",)},
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("1661824807")
+    assert result.reason == "unique_domain_alias"
+    assert result.domain_candidate_ids == ("1661824807",)
+    assert result.name_candidate_ids == ("1661824807",)
+
+
+def test_account_domain_alias_never_matches_without_exact_name_agreement() -> None:
+    index = AccountsIndex(
+        (_record("1661824807", "AccuRoof", domain="accuroof.co.uk"),)
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="sigplc.com", company="Another SIG Company"),
+        account_domain_aliases={"1661824807": ("sigplc.com",)},
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.domain_candidate_ids == ("1661824807",)
+    assert result.name_candidate_ids == ()
+
+
 def test_similar_name_never_auto_links() -> None:
     index = AccountsIndex((_record("10", "Kingsgate Construction"),))
 

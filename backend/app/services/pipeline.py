@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol, cast
 
@@ -80,6 +80,11 @@ class PipelineDependencies:
     internal_email_domains: tuple[str, ...]
     excluded_group_ids: tuple[str, ...] = ()
     allow_name_fallback: bool = False
+    internal_company_aliases: tuple[str, ...] = ()
+    requester_domain_aliases: Mapping[str, str] = field(default_factory=dict)
+    account_requester_domain_aliases: Mapping[str, Sequence[str]] = field(
+        default_factory=dict
+    )
 
 
 def analysis_allowed(
@@ -218,16 +223,19 @@ def _run_extraction_stage(
         BOARD_CONTRACT.sales_board_id
     )
     with download_email_assets(dependencies.monday, snapshot.email_assets) as assets:
+        requester = _extract_requester(
+            assets,
+            internal_domains=dependencies.internal_email_domains,
+            domain_aliases=dependencies.requester_domain_aliases,
+        )
         postcode = analyze_downloaded_email_assets(
             assets,
             client=dependencies.postcode_client,
             postcode_column=postcode_column,
+            requester=requester,
+            internal_company_aliases=dependencies.internal_company_aliases,
         )
-        requester = _extract_requester(
-            assets,
-            structured_company=postcode.company,
-            internal_domains=dependencies.internal_email_domains,
-        )
+        requester = replace(requester, company=postcode.company)
 
     with session_factory() as session:
         current = lock_owned_job(session, job_id, worker_id=worker_id)
@@ -292,6 +300,7 @@ def _run_matching_stage(
         dependencies.accounts.load_index(),
         requester,
         allow_name_fallback=dependencies.allow_name_fallback,
+        account_domain_aliases=dependencies.account_requester_domain_aliases,
     )
 
     with session_factory() as session:
@@ -617,8 +626,8 @@ def _identity_payload(job: ProcessingJob) -> dict[str, Any]:
 def _extract_requester(
     assets: Sequence[DownloadedEmailAsset],
     *,
-    structured_company: str | None,
     internal_domains: tuple[str, ...],
+    domain_aliases: Mapping[str, str],
 ) -> RequesterIdentity:
     fallback: RequesterIdentity | None = None
     for asset in sorted(assets, key=lambda value: int(value.identity.asset_id)):
@@ -628,7 +637,7 @@ def _extract_requester(
         requester = extract_requester_identity(
             parsed,
             internal_domains=internal_domains,
-            structured_company=structured_company,
+            domain_aliases=domain_aliases,
         )
         fallback = fallback or requester
         if requester.source != "not_found":

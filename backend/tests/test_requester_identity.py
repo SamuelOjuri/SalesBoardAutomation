@@ -82,6 +82,30 @@ def test_generic_provider_is_not_automatic_domain_evidence() -> None:
     assert identity.source == "top_level_sender"
 
 
+def test_exact_relay_host_can_map_to_the_verified_business_domain() -> None:
+    identity = extract_requester_identity(
+        _parsed("Tremco Support <support@tremcocpgsupport.zendesk.com>"),
+        internal_domains=["taperedplus.co.uk"],
+        domain_aliases={
+            "tremcocpgsupport.zendesk.com": "tremcocpg.com",
+        },
+    )
+
+    assert identity.email_address == "support@tremcocpgsupport.zendesk.com"
+    assert identity.domain == "tremcocpg.com"
+    assert identity.source == "top_level_sender"
+
+
+def test_relay_alias_does_not_apply_to_unlisted_subdomains() -> None:
+    identity = extract_requester_identity(
+        _parsed("Other Tenant <support@othercompany.zendesk.com>"),
+        internal_domains=["taperedplus.co.uk"],
+        domain_aliases={"zendesk.com": "tremcocpg.com"},
+    )
+
+    assert identity.domain == "zendesk.com"
+
+
 def test_arbitrary_from_text_is_not_treated_as_a_forwarded_header() -> None:
     parsed = _parsed(
         "Sales <sales@taperedplus.co.uk>",

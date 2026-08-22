@@ -100,17 +100,24 @@ the temporary directory on every exit path.
 
 `backend/app/services/email_parser.py` parses verified `.eml` and `.msg` files.
 It prefers plain-text message bodies and falls back to visible HTML text, then
-extracts text from PDF and supported image attachments through an injected
-multimodal client. Files are processed in numeric asset-ID order, and their
+extracts text from PDFs and non-inline supported images through an injected
+multimodal client. Inline images are excluded by default so internal signature
+logos cannot become requester-company evidence. DOCX text is extracted locally
+from bounded WordprocessingML document, header, footer, footnote, and endnote
+parts; archive-member, expanded-size, and XML-part limits fail closed on unsafe
+or malformed files. Files are processed in numeric asset-ID order, and their
 size and SHA-256 are revalidated immediately before parsing.
 
 `backend/app/services/postcode.py` sends the combined untrusted content to the
 configured Gemini model using a strict Pydantic response schema that can
 return only the project-location postcode and an explicitly stated requester
-company. The prompt and schema explicitly exclude sender, recipient,
-signature, and correspondence addresses from postcode selection. Company is
-secondary account-matching evidence only. Malformed or augmented model output
-is rejected.
+company. Trusted requester metadata is derived before model extraction and is
+kept outside the untrusted-content boundary. The prompt and schema explicitly
+exclude sender, recipient, signature, and correspondence addresses from
+postcode selection. Model-supplied company evidence is accepted only when it
+occurs as consecutive whole tokens in the extracted content and is not listed
+in `INTERNAL_COMPANY_ALIASES`. Company is secondary account-matching evidence
+only. Malformed or augmented model output is rejected.
 
 The extracted postcode is reduced to its alphabetic area using the pinned
 reference behavior. `MondayClient.load_postcode_dropdown_column` obtains the
@@ -138,7 +145,10 @@ sender, then inspects forwarded header blocks in newest-first order when the
 top-level sender is internal. Addresses are lower-cased and IDNA-normalized;
 registrable domains are derived from an offline public-suffix snapshot. Generic
 email providers are retained as requester addresses but are never automatic
-domain evidence.
+domain evidence. `REQUESTER_DOMAIN_ALIASES` is a JSON object of exact sender
+hosts to verified business domains. Exact-host scope preserves tenant evidence
+for approved relay services without treating every tenant on the relay's
+registrable domain as the same company.
 
 `backend/app/services/accounts.py` loads every Accounts page through typed
 Monday column values, including the final page whose cursor is null. Only
@@ -146,6 +156,13 @@ Duplicate label ID `1` excludes an item, while null and empty values remain
 eligible. Complete indexes are cached for five minutes. A selected Account is
 always re-fetched, must belong to the configured Accounts board, and must still
 be active and unflagged before publication.
+
+Direct domain matching remains the primary automatic Account rule.
+`ACCOUNT_REQUESTER_DOMAIN_ALIASES` is a JSON object keyed by Account item ID;
+each value is a list of independently verified requester domains. An
+Account-specific alias can match only when the alias identifies one eligible
+Account and the extracted company is also one unique exact normalized name for
+that same Account. Alias-only or conflicting evidence remains unresolved.
 
 Generate a fresh JSON export of the complete Accounts board from the repository
 root with:

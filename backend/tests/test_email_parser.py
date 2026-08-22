@@ -1,4 +1,6 @@
 import hashlib
+import io
+import zipfile
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -8,7 +10,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.input_revision import EmailAssetIdentity
-from app.services.email_parser import process_email_content
+from app.services.email_parser import (
+    EmailAttachment,
+    extract_docx_text,
+    extract_text_from_email,
+    process_email_content,
+)
 from app.services.intake import DownloadedEmailAsset
 from app.services.postcode import (
     DesignParameterExtraction,
@@ -33,6 +40,7 @@ def _eml_bytes(
     html_body: str | None = None,
     pdf_content: bytes | None = None,
     image_content: bytes | None = None,
+    docx_content: bytes | None = None,
 ) -> bytes:
     message = EmailMessage()
     message["From"] = "requester@example.com"
@@ -59,7 +67,39 @@ def _eml_bytes(
             subtype="png",
             filename="plan.png",
         )
+    if docx_content is not None:
+        message.add_attachment(
+            docx_content,
+            maintype="application",
+            subtype=(
+                "vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            filename="delivery-plan.docx",
+        )
     return message.as_bytes()
+
+
+def _docx_bytes(*paragraphs: str) -> bytes:
+    escaped = [
+        paragraph.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        for paragraph in paragraphs
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+        'wordprocessingml/2006/main"><w:body>'
+        + "".join(f"<w:p><w:r><w:t>{value}</w:t></w:r></w:p>" for value in escaped)
+        + "</w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        archive.writestr("word/document.xml", document)
+    return buffer.getvalue()
 
 
 def _downloaded_asset(
@@ -90,6 +130,7 @@ class FakeExtractionClient:
         self.company = company
         self.context = ""
         self.pdf_filenames: list[str] = []
+        self.image_filenames: list[str] = []
 
     def process_pdf(self, content: bytes, filename: str) -> str:
         self.pdf_filenames.append(filename)
@@ -101,10 +142,19 @@ class FakeExtractionClient:
         filename: str,
         image_type: str = "ATTACHMENT",
     ) -> str:
-        del filename, image_type
+        del image_type
+        self.image_filenames.append(filename)
         return content.decode("utf-8")
 
-    def extract_design_parameters(self, context: str) -> DesignParameterExtraction:
+    def extract_design_parameters(
+        self,
+        context: str,
+        *,
+        requester_domain: str | None = None,
+        requester_source: str = "not_found",
+        internal_company_aliases: tuple[str, ...] | list[str] = (),
+    ) -> DesignParameterExtraction:
+        del requester_domain, requester_source, internal_company_aliases
         self.context = context
         return DesignParameterExtraction(
             post_code=self.post_code,
@@ -220,6 +270,53 @@ def test_project_postcode_can_come_only_from_image_attachment(tmp_path: Path) ->
     assert result.label_id == 115
 
 
+def test_project_postcode_can_come_only_from_docx_attachment(tmp_path: Path) -> None:
+    content = _eml_bytes(
+        "Please see the attached delivery plan.",
+        docx_content=_docx_bytes("Project delivery location", "HP3 0NZ"),
+    )
+    asset = _downloaded_asset(tmp_path, asset_id="9", content=content)
+    client = FakeExtractionClient("HP3 0NZ")
+    postcode_column = _postcode_column()
+    postcode_column["settings"] = {
+        "labels": [{"id": 48, "label": "HP", "is_deactivated": False}]
+    }
+
+    result = analyze_downloaded_email_assets(
+        [asset], client=client, postcode_column=postcode_column
+    )
+
+    assert "DOCX ATTACHMENT (delivery-plan.docx)" in client.context
+    assert "Project delivery location\nHP3 0NZ" in client.context
+    assert result.area == "HP"
+    assert result.label_id == 48
+
+
+def test_docx_parser_rejects_non_ooxml_content() -> None:
+    with pytest.raises(ValueError, match="valid ZIP archive"):
+        extract_docx_text(b"not-a-docx")
+
+
+def test_inline_images_are_not_ocr_processed_by_default() -> None:
+    client = FakeExtractionClient(None)
+    inline = EmailAttachment(
+        filename="signature.png",
+        content=b"TaperedPlus",
+        content_type="image/png",
+        inline=True,
+    )
+
+    context = extract_text_from_email(
+        "External request from Styrene",
+        [inline],
+        extractor=client,
+    )
+
+    assert client.image_filenames == []
+    assert "signature-safe policy" in context
+    assert "TaperedPlus" not in context
+
+
 def test_structured_choice_can_ignore_other_addresses(tmp_path: Path) -> None:
     content = _eml_bytes(
         "Company office SW1A 1AA. Sender address M1 1AA. "
@@ -243,7 +340,9 @@ def test_structured_company_is_carried_as_secondary_identity_evidence(
     asset = _downloaded_asset(
         tmp_path,
         asset_id="1",
-        content=_eml_bytes("Please quote for the supplied project."),
+        content=_eml_bytes(
+            "Please quote for the supplied project for Kingsgate Construction."
+        ),
     )
     client = FakeExtractionClient(None, "  Kingsgate   Construction  ")
 

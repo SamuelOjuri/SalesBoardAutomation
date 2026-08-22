@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import re
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,12 +15,31 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import PurePath
 from typing import Any, Protocol
+from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 import extract_msg
 
 
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_DOCX_TEXT_PART_PATTERN = re.compile(
+    r"^word/(?:document|header\d+|footer\d+|footnotes|endnotes)\.xml$"
+)
+_WORDPROCESSING_NAMESPACE = (
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+)
+_WORD_PARAGRAPH_TAG = f"{{{_WORDPROCESSING_NAMESPACE}}}p"
+_WORD_TEXT_TAG = f"{{{_WORDPROCESSING_NAMESPACE}}}t"
+_WORD_TAB_TAG = f"{{{_WORDPROCESSING_NAMESPACE}}}tab"
+_WORD_BREAK_TAGS = frozenset(
+    {
+        f"{{{_WORDPROCESSING_NAMESPACE}}}br",
+        f"{{{_WORDPROCESSING_NAMESPACE}}}cr",
+    }
+)
+_MAX_DOCX_MEMBERS = 2_048
+_MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+_MAX_DOCX_XML_PART_BYTES = 8 * 1024 * 1024
 
 
 class AttachmentTextExtractor(Protocol):
@@ -95,6 +116,7 @@ def extract_text_from_email(
     attachments: Sequence[EmailAttachment],
     *,
     extractor: AttachmentTextExtractor,
+    include_inline_images: bool = False,
 ) -> str:
     sections = [f"EMAIL CONTENT:\n{email_text}"]
     for attachment in attachments:
@@ -107,7 +129,18 @@ def extract_text_from_email(
                 sections.append(
                     f"PDF ATTACHMENT ({attachment.filename}):\n{text}"
                 )
+            elif suffix == ".docx":
+                text = extract_docx_text(attachment.content)
+                sections.append(
+                    f"DOCX ATTACHMENT ({attachment.filename}):\n{text}"
+                )
             elif suffix in _IMAGE_EXTENSIONS:
+                if attachment.inline and not include_inline_images:
+                    sections.append(
+                        f"INLINE IMAGE ({attachment.filename}) "
+                        "[not processed: signature-safe policy]"
+                    )
+                    continue
                 image_type = "INLINE IMAGE" if attachment.inline else "ATTACHMENT"
                 text = extractor.process_image(
                     attachment.content,
@@ -126,6 +159,67 @@ def extract_text_from_email(
                 f"ATTACHMENT ({attachment.filename}) [processing failed]"
             )
     return "\n\n".join(sections)
+
+
+def extract_docx_text(content: bytes) -> str:
+    """Extract visible OOXML text without executing relationships or macros."""
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content))
+    except (OSError, zipfile.BadZipFile) as error:
+        raise ValueError("DOCX attachment is not a valid ZIP archive") from error
+
+    with archive:
+        members = archive.infolist()
+        if len(members) > _MAX_DOCX_MEMBERS:
+            raise ValueError("DOCX attachment contains too many archive members")
+        if any(member.flag_bits & 0x1 for member in members):
+            raise ValueError("encrypted DOCX attachments are not supported")
+        if sum(member.file_size for member in members) > _MAX_DOCX_UNCOMPRESSED_BYTES:
+            raise ValueError("DOCX attachment expands beyond the safe size limit")
+
+        names = {member.filename for member in members}
+        if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+            raise ValueError("DOCX attachment is missing required OOXML parts")
+
+        text_parts: list[str] = []
+        for member in members:
+            if _DOCX_TEXT_PART_PATTERN.fullmatch(member.filename) is None:
+                continue
+            if member.file_size > _MAX_DOCX_XML_PART_BYTES:
+                raise ValueError("DOCX XML part exceeds the safe size limit")
+            raw_xml = archive.read(member)
+            lowered = raw_xml.lower()
+            if b"<!doctype" in lowered or b"<!entity" in lowered:
+                raise ValueError("DOCX XML declarations are not supported")
+            try:
+                root = ElementTree.fromstring(raw_xml)
+            except ElementTree.ParseError as error:
+                raise ValueError("DOCX attachment contains malformed XML") from error
+            part_text = _wordprocessing_text(root)
+            if part_text:
+                text_parts.append(part_text)
+
+    return "\n".join(text_parts).strip() or "[no extractable text]"
+
+
+def _wordprocessing_text(root: ElementTree.Element) -> str:
+    paragraphs: list[str] = []
+    for paragraph in root.iter(_WORD_PARAGRAPH_TAG):
+        fragments: list[str] = []
+        for node in paragraph.iter():
+            if node.tag == _WORD_TEXT_TAG:
+                fragments.append(node.text or "")
+            elif node.tag == _WORD_TAB_TAG:
+                fragments.append("\t")
+            elif node.tag in _WORD_BREAK_TAGS:
+                fragments.append("\n")
+        rendered = "".join(fragments)
+        lines = [" ".join(line.split()) for line in rendered.splitlines()]
+        normalized = "\n".join(line for line in lines if line)
+        if normalized:
+            paragraphs.append(normalized)
+    return "\n".join(paragraphs)
 
 
 def _parse_eml(content: bytes) -> ParsedEmail:
@@ -257,4 +351,8 @@ def _content_type_for_suffix(suffix: str) -> str:
         ".jpeg": "image/jpeg",
         ".png": "image/png",
         ".webp": "image/webp",
+        ".docx": (
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
     }.get(suffix, "application/octet-stream")

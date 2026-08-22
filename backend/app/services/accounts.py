@@ -6,7 +6,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -17,6 +17,7 @@ from app.services.requester_identity import RequesterIdentity, normalize_domain
 
 AccountMatchReason = Literal[
     "unique_domain",
+    "unique_domain_alias",
     "unique_exact_name",
     "not_found_or_ambiguous",
 ]
@@ -99,13 +100,28 @@ def match_account(
     requester: RequesterIdentity,
     *,
     allow_name_fallback: bool = False,
+    account_domain_aliases: Mapping[str, Sequence[str]] | None = None,
 ) -> AccountMatchResult:
     eligible = index.eligible_accounts
-    domain_matches = tuple(
+    direct_domain_matches = tuple(
         account
         for account in eligible
         if requester.domain is not None
         and account.email_domain == requester.domain
+    )
+    normalized_aliases = _normalize_account_domain_aliases(
+        account_domain_aliases or {}
+    )
+    alias_domain_matches = tuple(
+        account
+        for account in eligible
+        if requester.domain is not None
+        and requester.domain in normalized_aliases.get(account.item_id, ())
+    )
+    domain_matches = tuple(
+        account
+        for account in eligible
+        if account in direct_domain_matches or account in alias_domain_matches
     )
     normalized_company = normalize_account_name(requester.company)
     name_matches = tuple(
@@ -115,11 +131,25 @@ def match_account(
         and normalize_account_name(account.name) == normalized_company
     )
 
-    if len(domain_matches) == 1 and not _name_evidence_conflicts(
-        domain_matches[0], name_matches
+    if (
+        len(domain_matches) == 1
+        and domain_matches[0] in direct_domain_matches
+        and not _name_evidence_conflicts(domain_matches[0], name_matches)
     ):
         return _match_result(
             domain_matches[0], "unique_domain", domain_matches, name_matches
+        )
+    if (
+        len(domain_matches) == 1
+        and domain_matches[0] in alias_domain_matches
+        and len(name_matches) == 1
+        and name_matches[0].item_id == domain_matches[0].item_id
+    ):
+        return _match_result(
+            domain_matches[0],
+            "unique_domain_alias",
+            domain_matches,
+            name_matches,
         )
     if requester.domain is None and len(name_matches) == 1:
         return _match_result(
@@ -158,7 +188,11 @@ def _name_evidence_conflicts(
 
 def _match_result(
     account: AccountRecord,
-    reason: Literal["unique_domain", "unique_exact_name"],
+    reason: Literal[
+        "unique_domain",
+        "unique_domain_alias",
+        "unique_exact_name",
+    ],
     domain_matches: tuple[AccountRecord, ...],
     name_matches: tuple[AccountRecord, ...],
 ) -> AccountMatchResult:
@@ -173,6 +207,27 @@ def _match_result(
 
 def _candidate_ids(accounts: tuple[AccountRecord, ...]) -> tuple[str, ...]:
     return tuple(account.item_id for account in accounts)
+
+
+def _normalize_account_domain_aliases(
+    values: Mapping[str, Sequence[str]],
+) -> dict[str, frozenset[str]]:
+    aliases: dict[str, frozenset[str]] = {}
+    for raw_item_id, raw_domains in values.items():
+        item_id = str(raw_item_id).strip()
+        if not item_id.isdecimal() or int(item_id) <= 0:
+            continue
+        domain_values = (
+            (raw_domains,) if isinstance(raw_domains, str) else raw_domains
+        )
+        domains = frozenset(
+            domain
+            for value in domain_values
+            if (domain := normalize_domain(value)) is not None
+        )
+        if domains:
+            aliases[item_id] = domains
+    return aliases
 
 
 class AccountsIndexService:

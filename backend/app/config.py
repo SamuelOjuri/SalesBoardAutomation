@@ -11,12 +11,23 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
 PROCESSING_PIPELINE_RELEASE = "sales-requester-v1"
-POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v2"
+POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v3"
 POSTCODE_NORMALIZATION_REVISION = "postcode-area-v1"
 POSTCODE_LABEL_MAPPING_REVISION = "postcode-label-mapping-v1"
-REQUESTER_IDENTITY_REVISION = "requester-identity-v1"
-ACCOUNT_MATCHING_REVISION = "account-matching-v1"
+REQUESTER_IDENTITY_REVISION = "requester-identity-v2"
+ACCOUNT_MATCHING_REVISION = "account-matching-v2"
 DEFAULT_EXCLUDED_SALES_GROUP_IDS = ("group_mm5eqjq4",)
+DEFAULT_INTERNAL_COMPANY_ALIASES = (
+    "TaperedPlus",
+    "Tapered Plus",
+    "Tapered Plus Limited",
+)
+DEFAULT_REQUESTER_DOMAIN_ALIASES = {
+    "tremcocpgsupport.zendesk.com": "tremcocpg.com",
+}
+DEFAULT_ACCOUNT_REQUESTER_DOMAIN_ALIASES = {
+    "1661824807": ("sigplc.com",),
+}
 
 
 def build_processing_pipeline_version(
@@ -232,6 +243,20 @@ class Settings(BaseSettings):
     internal_email_domains: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["taperedplus.co.uk"]
     )
+    internal_company_aliases: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_INTERNAL_COMPANY_ALIASES)
+    )
+    requester_domain_aliases: Annotated[dict[str, str], NoDecode] = Field(
+        default_factory=lambda: dict(DEFAULT_REQUESTER_DOMAIN_ALIASES)
+    )
+    account_requester_domain_aliases: Annotated[
+        dict[str, list[str]], NoDecode
+    ] = Field(
+        default_factory=lambda: {
+            item_id: list(domains)
+            for item_id, domains in DEFAULT_ACCOUNT_REQUESTER_DOMAIN_ALIASES.items()
+        }
+    )
 
     sales_board_id: int = Field(default=BOARD_CONTRACT.sales_board_id, gt=0)
     accounts_board_id: int = Field(default=BOARD_CONTRACT.accounts_board_id, gt=0)
@@ -348,6 +373,71 @@ class Settings(BaseSettings):
             raise ValueError("internal_email_domains must not be empty")
         return normalised
 
+    @field_validator("internal_company_aliases", mode="before")
+    @classmethod
+    def _normalise_internal_company_aliases(cls, value: object) -> list[str]:
+        values = _parse_list_setting(value, "internal_company_aliases")
+        normalised: list[str] = []
+        for alias in values:
+            candidate = " ".join(str(alias).split())
+            if not candidate:
+                raise ValueError(
+                    "internal_company_aliases must contain non-empty values"
+                )
+            if candidate.casefold() not in {
+                existing.casefold() for existing in normalised
+            }:
+                normalised.append(candidate)
+        if not normalised:
+            raise ValueError("internal_company_aliases must not be empty")
+        return normalised
+
+    @field_validator("requester_domain_aliases", mode="before")
+    @classmethod
+    def _normalise_requester_domain_aliases(
+        cls, value: object
+    ) -> dict[str, str]:
+        mapping = _parse_mapping_setting(value, "requester_domain_aliases")
+        normalised: dict[str, str] = {}
+        for raw_source, raw_target in mapping.items():
+            source = _normalise_domain_setting(raw_source)
+            target = _normalise_domain_setting(raw_target)
+            normalised[source] = target
+        return normalised
+
+    @field_validator("account_requester_domain_aliases", mode="before")
+    @classmethod
+    def _normalise_account_requester_domain_aliases(
+        cls, value: object
+    ) -> dict[str, list[str]]:
+        mapping = _parse_mapping_setting(
+            value,
+            "account_requester_domain_aliases",
+        )
+        normalised: dict[str, list[str]] = {}
+        for raw_item_id, raw_domains in mapping.items():
+            item_id = str(raw_item_id).strip()
+            if not item_id.isdecimal() or int(item_id) <= 0:
+                raise ValueError(
+                    "account_requester_domain_aliases keys must be positive "
+                    "decimal Account IDs"
+                )
+            domains = _parse_list_setting(
+                raw_domains,
+                "account_requester_domain_aliases",
+            )
+            parsed_domains: list[str] = []
+            for raw_domain in domains:
+                domain = _normalise_domain_setting(raw_domain)
+                if domain not in parsed_domains:
+                    parsed_domains.append(domain)
+            if not parsed_domains:
+                raise ValueError(
+                    "account_requester_domain_aliases values must not be empty"
+                )
+            normalised[item_id] = parsed_domains
+        return normalised
+
     @model_validator(mode="after")
     def _validate_authentication_and_mode(self) -> "Settings":
         expected_pipeline_version = build_processing_pipeline_version(
@@ -408,6 +498,39 @@ def _parse_list_setting(value: object, field_name: str) -> list[object]:
     if isinstance(value, (list, tuple, set)):
         return list(value)
     return [value]
+
+
+def _parse_mapping_setting(
+    value: object,
+    field_name: str,
+) -> dict[object, object]:
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{field_name} must be a JSON object") from error
+    else:
+        parsed = value
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return dict(parsed)
+
+
+def _normalise_domain_setting(value: object) -> str:
+    candidate = str(value).strip().casefold().removeprefix("www.").rstrip(".")
+    if (
+        not candidate
+        or "." not in candidate
+        or "@" in candidate
+        or any(character.isspace() for character in candidate)
+    ):
+        raise ValueError("domain alias settings contain an invalid domain")
+    try:
+        return candidate.encode("idna").decode("ascii")
+    except UnicodeError as error:
+        raise ValueError("domain alias settings contain an invalid domain") from error
 
 
 @lru_cache

@@ -152,8 +152,18 @@ class FakePostcodeClient:
         del content, filename, image_type
         return ""
 
-    def extract_design_parameters(self, context: str) -> DesignParameterExtraction:
+    def extract_design_parameters(
+        self,
+        context: str,
+        *,
+        requester_domain: str | None = None,
+        requester_source: str = "not_found",
+        internal_company_aliases: tuple[str, ...] | list[str] = (),
+    ) -> DesignParameterExtraction:
         assert "WA4 6NL" in context
+        assert requester_domain == "acme.co.uk"
+        assert requester_source == "top_level_sender"
+        del internal_company_aliases
         self.extraction_count += 1
         return DesignParameterExtraction(post_code="WA4 6NL", company="Acme")
 

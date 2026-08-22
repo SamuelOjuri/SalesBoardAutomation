@@ -7,6 +7,7 @@ from app.services.postcode import (
     extract_postcode_area,
     format_dropdown_for_monday,
     resolve_postcode_label,
+    validate_company_evidence,
 )
 
 
@@ -114,3 +115,30 @@ def test_wrong_dropdown_column_is_not_used() -> None:
     column["id"] = "some_other_dropdown"
 
     assert resolve_postcode_label("WA4 6NL", column) is None
+
+
+def test_company_evidence_rejects_internal_alias_and_domain_only_mentions() -> None:
+    evidence = (
+        "From: sales@taperedplus.co.uk\n"
+        "Visit https://www.accuroof.co.uk/quote\n"
+        "External requester: Styrene Packaging"
+    )
+
+    assert (
+        validate_company_evidence(
+            "TaperedPlus",
+            evidence=evidence,
+            internal_company_aliases=("TaperedPlus", "Tapered Plus"),
+        )
+        is None
+    )
+    assert validate_company_evidence("AccuRoof", evidence=evidence) is None
+    assert (
+        validate_company_evidence("Styrene Packaging", evidence=evidence)
+        == "Styrene Packaging"
+    )
+
+
+def test_company_evidence_requires_whole_consecutive_tokens() -> None:
+    assert validate_company_evidence("SPI", evidence="Hospital project") is None
+    assert validate_company_evidence("SPI", evidence="Company: SPI") == "SPI"

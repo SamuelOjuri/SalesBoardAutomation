@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from email import policy
 from email.parser import Parser
@@ -60,6 +61,7 @@ def extract_requester_identity(
     *,
     internal_domains: list[str] | tuple[str, ...],
     structured_company: str | None = None,
+    domain_aliases: Mapping[str, str] | None = None,
 ) -> RequesterIdentity:
     """Select the first trustworthy external sender and its domain evidence."""
 
@@ -68,15 +70,22 @@ def extract_requester_identity(
         for value in internal_domains
         if (domain := normalize_domain(value)) is not None
     )
+    normalized_domain_aliases = _normalize_domain_aliases(domain_aliases or {})
     company = normalize_company(structured_company)
 
-    top_level_sender = _top_level_sender(parsed_email.header)
+    top_level_sender = _top_level_sender(
+        parsed_email.header,
+        domain_aliases=normalized_domain_aliases,
+    )
     if top_level_sender is not None and not _is_internal(
         top_level_sender[1], normalized_internal_domains
     ):
         return _identity(top_level_sender, company, "top_level_sender")
 
-    for sender in _forwarded_senders(parsed_email.body):
+    for sender in _forwarded_senders(
+        parsed_email.body,
+        domain_aliases=normalized_domain_aliases,
+    ):
         if not _is_internal(sender[1], normalized_internal_domains):
             return _identity(sender, company, "forwarded_sender")
 
@@ -127,12 +136,23 @@ def _identity(
     )
 
 
-def _top_level_sender(header: str) -> tuple[str, str] | None:
+def _top_level_sender(
+    header: str,
+    *,
+    domain_aliases: Mapping[str, str],
+) -> tuple[str, str] | None:
     message = Parser(policy=policy.default).parsestr(f"{header}\n\n")
-    return _first_mailbox(message.get_all("from", []))
+    return _first_mailbox(
+        message.get_all("from", []),
+        domain_aliases=domain_aliases,
+    )
 
 
-def _forwarded_senders(body: str) -> tuple[tuple[str, str], ...]:
+def _forwarded_senders(
+    body: str,
+    *,
+    domain_aliases: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
     lines = body.splitlines()
     senders: list[tuple[str, str]] = []
     for index, line in enumerate(lines):
@@ -141,7 +161,10 @@ def _forwarded_senders(body: str) -> tuple[tuple[str, str], ...]:
             continue
         if not _is_forwarded_header_block(lines, index):
             continue
-        sender = _first_mailbox([match.group(2)])
+        sender = _first_mailbox(
+            [match.group(2)],
+            domain_aliases=domain_aliases,
+        )
         if sender is not None:
             senders.append(sender)
     return tuple(senders)
@@ -165,7 +188,11 @@ def _is_forwarded_header_block(lines: list[str], from_index: int) -> bool:
     return "subject" in header_names and bool(header_names & {"sent", "date", "to"})
 
 
-def _first_mailbox(values: list[str]) -> tuple[str, str] | None:
+def _first_mailbox(
+    values: list[str],
+    *,
+    domain_aliases: Mapping[str, str],
+) -> tuple[str, str] | None:
     for _display_name, raw_address in getaddresses(values):
         local_part, separator, raw_domain = raw_address.strip().rpartition("@")
         if not separator or not local_part:
@@ -174,8 +201,20 @@ def _first_mailbox(values: list[str]) -> tuple[str, str] | None:
         domain = normalize_domain(normalized_host)
         if normalized_host is None or domain is None:
             continue
+        domain = domain_aliases.get(normalized_host, domain)
         return f"{local_part.casefold()}@{normalized_host}", domain
     return None
+
+
+def _normalize_domain_aliases(values: Mapping[str, str]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for raw_source, raw_target in values.items():
+        source_host = _normalize_host_domain(raw_source)
+        target_domain = normalize_domain(raw_target)
+        if source_host is None or target_domain is None:
+            continue
+        aliases[source_host] = target_domain
+    return aliases
 
 
 def _is_internal(domain: str, internal_domains: frozenset[str]) -> bool:

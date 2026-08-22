@@ -128,6 +128,12 @@ def create_worker_runtime(
         publication_gate=gate,
         internal_email_domains=tuple(runtime_settings.internal_email_domains),
         excluded_group_ids=tuple(runtime_settings.processing_excluded_group_ids),
+        internal_company_aliases=tuple(runtime_settings.internal_company_aliases),
+        requester_domain_aliases=dict(runtime_settings.requester_domain_aliases),
+        account_requester_domain_aliases={
+            item_id: tuple(domains)
+            for item_id, domains in runtime_settings.account_requester_domain_aliases.items()
+        },
     )
     runtime = WorkerRuntime(
         settings=runtime_settings,

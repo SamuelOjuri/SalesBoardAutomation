@@ -4,9 +4,13 @@ from pydantic import ValidationError
 from app.config import (
     ACCOUNT_MATCHING_REVISION,
     BOARD_CONTRACT,
+    DEFAULT_ACCOUNT_REQUESTER_DOMAIN_ALIASES,
     DEFAULT_EXCLUDED_SALES_GROUP_IDS,
+    DEFAULT_INTERNAL_COMPANY_ALIASES,
+    DEFAULT_REQUESTER_DOMAIN_ALIASES,
     POSTCODE_EXTRACTION_REVISION,
     POSTCODE_LABEL_MAPPING_REVISION,
+    REQUESTER_IDENTITY_REVISION,
     Settings,
     build_processing_pipeline_version,
 )
@@ -58,12 +62,13 @@ def test_pipeline_version_changes_with_model_and_behavior_revisions() -> None:
     assert "gemini=gemini-2.5-flash-001" in baseline
     assert f"extraction={POSTCODE_EXTRACTION_REVISION}" in baseline
     assert f"mapping={POSTCODE_LABEL_MAPPING_REVISION}" in baseline
+    assert f"requester={REQUESTER_IDENTITY_REVISION}" in baseline
     assert f"matching={ACCOUNT_MATCHING_REVISION}" in baseline
     assert build_processing_pipeline_version("gemini-2.5-flash-002") != baseline
     assert (
         build_processing_pipeline_version(
             "gemini-2.5-flash-001",
-            extraction_revision="postcode-extraction-v3",
+            extraction_revision="postcode-extraction-next",
         )
         != baseline
     )
@@ -77,7 +82,7 @@ def test_pipeline_version_changes_with_model_and_behavior_revisions() -> None:
     assert (
         build_processing_pipeline_version(
             "gemini-2.5-flash-001",
-            account_matching_revision="account-matching-v2",
+            account_matching_revision="account-matching-next",
         )
         != baseline
     )
@@ -97,6 +102,35 @@ def test_completed_folder_is_excluded_by_default() -> None:
     assert settings.processing_excluded_group_ids == list(
         DEFAULT_EXCLUDED_SALES_GROUP_IDS
     )
+    assert settings.internal_company_aliases == list(
+        DEFAULT_INTERNAL_COMPANY_ALIASES
+    )
+    assert settings.requester_domain_aliases == DEFAULT_REQUESTER_DOMAIN_ALIASES
+    assert settings.account_requester_domain_aliases == {
+        item_id: list(domains)
+        for item_id, domains in DEFAULT_ACCOUNT_REQUESTER_DOMAIN_ALIASES.items()
+    }
+
+
+def test_domain_alias_settings_are_validated_from_json() -> None:
+    values = settings_values()
+    values.update(
+        requester_domain_aliases=(
+            '{"Support.Example.Zendesk.com":"Example.CO.UK"}'
+        ),
+        account_requester_domain_aliases=(
+            '{"123":["Parent.Example.com","parent.example.com"]}'
+        ),
+    )
+
+    settings = Settings(_env_file=None, **values)
+
+    assert settings.requester_domain_aliases == {
+        "support.example.zendesk.com": "example.co.uk"
+    }
+    assert settings.account_requester_domain_aliases == {
+        "123": ["parent.example.com"]
+    }
 
 
 def test_settings_require_a_webhook_authentication_method() -> None:
