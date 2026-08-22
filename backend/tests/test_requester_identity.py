@@ -40,6 +40,7 @@ def test_external_top_level_sender_is_preferred_and_normalized() -> None:
     assert identity.domain == "example.co.uk"
     assert identity.company == "Example Construction Ltd"
     assert identity.source == "top_level_sender"
+    assert identity.website_domains == ()
 
 
 def test_internal_forward_uses_newest_external_forwarded_header() -> None:
@@ -55,7 +56,8 @@ def test_internal_forward_uses_newest_external_forwarded_header() -> None:
             "From: Customer <CUSTOMER@www.B\u00dcCHER.DE>\n"
             "Sent: Wednesday, 19 August 2026 08:00\n"
             "To: person@taperedplus.co.uk\n"
-            "Subject: Request"
+            "Subject: Request\n\n"
+            "Website: https://www.customer.de"
         ),
     )
 
@@ -67,6 +69,7 @@ def test_internal_forward_uses_newest_external_forwarded_header() -> None:
     assert identity.email_address == "customer@xn--bcher-kva.de"
     assert identity.domain == "xn--bcher-kva.de"
     assert identity.source == "forwarded_sender"
+    assert identity.website_domains == ("customer.de",)
 
 
 def test_generic_provider_is_not_automatic_domain_evidence() -> None:
@@ -94,6 +97,73 @@ def test_exact_relay_host_can_map_to_the_verified_business_domain() -> None:
     assert identity.email_address == "support@tremcocpgsupport.zendesk.com"
     assert identity.domain == "tremcocpg.com"
     assert identity.source == "top_level_sender"
+
+
+def test_signature_website_unwraps_verified_cudasvc_destination() -> None:
+    identity = extract_requester_identity(
+        _parsed(
+            '"Dunsmore, Jamie" <jamiedunsmore@sigplc.com>',
+            body=(
+                "Best Regards\n"
+                "Jamie Dunsmore\n"
+                "W: https://linkprotect.cudasvc.com/url?"
+                "a=https%3A%2F%2Fwww.accuroof.co.uk%2Fcontact&c=opaque\n"
+                "Terms: https://www.sigplc.com/terms"
+            ),
+        ),
+        internal_domains=["taperedplus.co.uk"],
+    )
+
+    assert identity.domain == "sigplc.com"
+    assert identity.website_domains == ("accuroof.co.uk",)
+
+
+def test_signature_website_ignores_wrappers_without_one_destination() -> None:
+    identity = extract_requester_identity(
+        _parsed(
+            "Requester <requester@example.com>",
+            body="W: https://linkprotect.cudasvc.com/url?c=opaque",
+        ),
+        internal_domains=["taperedplus.co.uk"],
+    )
+
+    assert identity.website_domains == ()
+
+
+def test_signature_website_supports_direct_and_safe_links_destinations() -> None:
+    identity = extract_requester_identity(
+        _parsed(
+            "Requester <requester@example.com>",
+            body=(
+                "Web: www.Example.CO.UK/contact\n"
+                "Website: https://eur03.safelinks.protection.outlook.com/?"
+                "url=https%3A%2F%2Fcustomer.example.net%2Fhome&data=opaque"
+            ),
+        ),
+        internal_domains=["taperedplus.co.uk"],
+    )
+
+    assert identity.website_domains == ("example.co.uk", "example.net")
+
+
+def test_top_level_sender_does_not_inherit_quoted_signature_website() -> None:
+    identity = extract_requester_identity(
+        _parsed(
+            "Current Sender <current@example.com>",
+            body=(
+                "Please see below.\n\n"
+                "-----Original Message-----\n"
+                "From: Older Sender <older@other.example.com>\n"
+                "Sent: Tuesday, 18 August 2026 09:00\n"
+                "To: current@example.com\n"
+                "Subject: Older request\n\n"
+                "W: https://other.example.com"
+            ),
+        ),
+        internal_domains=["taperedplus.co.uk"],
+    )
+
+    assert identity.website_domains == ()
 
 
 def test_relay_alias_does_not_apply_to_unlisted_subdomains() -> None:

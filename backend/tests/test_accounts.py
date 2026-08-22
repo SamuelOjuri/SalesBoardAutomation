@@ -208,12 +208,14 @@ def _requester(
     *,
     domain: str | None,
     company: str | None,
+    website_domains: tuple[str, ...] = (),
 ) -> RequesterIdentity:
     return RequesterIdentity(
         email_address="requester@example.com",
         domain=domain,
         company=company,
         source="top_level_sender",
+        website_domains=website_domains,
     )
 
 
@@ -342,7 +344,7 @@ def test_name_fallback_for_unmatched_business_domain_requires_opt_in() -> None:
     assert allowed.reason == "unique_exact_name"
 
 
-def test_verified_account_domain_alias_requires_exact_name_agreement() -> None:
+def test_verified_account_domain_alias_requires_website_domain_agreement() -> None:
     index = AccountsIndex(
         (
             _record("1661824807", "AccuRoof", domain="accuroof.co.uk"),
@@ -352,32 +354,79 @@ def test_verified_account_domain_alias_requires_exact_name_agreement() -> None:
 
     result = match_account(
         index,
-        _requester(domain="sigplc.com", company="AccuRoof"),
+        _requester(
+            domain="sigplc.com",
+            company="SIG PLC",
+            website_domains=("accuroof.co.uk",),
+        ),
         account_domain_aliases={"1661824807": ("sigplc.com",)},
     )
 
     assert result.resolution is AccountResolution.MATCHED
     assert result.account == index.get("1661824807")
-    assert result.reason == "unique_domain_alias"
+    assert result.reason == "unique_domain_alias_website"
     assert result.domain_candidate_ids == ("1661824807",)
-    assert result.name_candidate_ids == ("1661824807",)
+    assert result.name_candidate_ids == ()
 
 
-def test_account_domain_alias_never_matches_without_exact_name_agreement() -> None:
+def test_account_domain_alias_never_matches_without_website_agreement() -> None:
     index = AccountsIndex(
         (_record("1661824807", "AccuRoof", domain="accuroof.co.uk"),)
     )
 
     result = match_account(
         index,
-        _requester(domain="sigplc.com", company="Another SIG Company"),
+        _requester(domain="sigplc.com", company="AccuRoof"),
         account_domain_aliases={"1661824807": ("sigplc.com",)},
     )
 
     assert result.resolution is AccountResolution.UNRESOLVED
     assert result.account is None
     assert result.domain_candidate_ids == ("1661824807",)
-    assert result.name_candidate_ids == ()
+    assert result.name_candidate_ids == ("1661824807",)
+
+
+def test_signature_website_never_matches_without_an_approved_requester_alias() -> None:
+    index = AccountsIndex(
+        (_record("1661824807", "AccuRoof", domain="accuroof.co.uk"),)
+    )
+
+    result = match_account(
+        index,
+        _requester(
+            domain="sigplc.com",
+            company="SIG PLC",
+            website_domains=("accuroof.co.uk",),
+        ),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.domain_candidate_ids == ()
+
+
+def test_account_domain_alias_rejects_conflicting_company_evidence() -> None:
+    index = AccountsIndex(
+        (
+            _record("1661824807", "AccuRoof", domain="accuroof.co.uk"),
+            _record("20", "Other SIG Company", domain="other.example"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(
+            domain="sigplc.com",
+            company="Other SIG Company",
+            website_domains=("accuroof.co.uk",),
+        ),
+        account_domain_aliases={"1661824807": ("sigplc.com",)},
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.domain_candidate_ids == ("1661824807",)
+    assert result.name_candidate_ids == ("20",)
 
 
 def test_similar_name_never_auto_links() -> None:

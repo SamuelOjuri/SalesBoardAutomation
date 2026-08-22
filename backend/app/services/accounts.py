@@ -17,7 +17,7 @@ from app.services.requester_identity import RequesterIdentity, normalize_domain
 
 AccountMatchReason = Literal[
     "unique_domain",
-    "unique_domain_alias",
+    "unique_domain_alias_website",
     "unique_exact_name",
     "not_found_or_ambiguous",
 ]
@@ -118,6 +118,17 @@ def match_account(
         if requester.domain is not None
         and requester.domain in normalized_aliases.get(account.item_id, ())
     )
+    requester_website_domains = frozenset(
+        domain
+        for value in requester.website_domains
+        if (domain := normalize_domain(value)) is not None
+    )
+    website_corroborated_alias_matches = tuple(
+        account
+        for account in alias_domain_matches
+        if account.email_domain is not None
+        and account.email_domain in requester_website_domains
+    )
     domain_matches = tuple(
         account
         for account in eligible
@@ -140,14 +151,16 @@ def match_account(
             domain_matches[0], "unique_domain", domain_matches, name_matches
         )
     if (
-        len(domain_matches) == 1
-        and domain_matches[0] in alias_domain_matches
-        and len(name_matches) == 1
-        and name_matches[0].item_id == domain_matches[0].item_id
+        not direct_domain_matches
+        and len(website_corroborated_alias_matches) == 1
+        and not _name_evidence_conflicts(
+            website_corroborated_alias_matches[0],
+            name_matches,
+        )
     ):
         return _match_result(
-            domain_matches[0],
-            "unique_domain_alias",
+            website_corroborated_alias_matches[0],
+            "unique_domain_alias_website",
             domain_matches,
             name_matches,
         )
@@ -190,7 +203,7 @@ def _match_result(
     account: AccountRecord,
     reason: Literal[
         "unique_domain",
-        "unique_domain_alias",
+        "unique_domain_alias_website",
         "unique_exact_name",
     ],
     domain_matches: tuple[AccountRecord, ...],

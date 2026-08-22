@@ -36,9 +36,11 @@ NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
 
 def eml_bytes(
     body: str = "Please quote for the project at WA4 6NL.",
+    *,
+    from_value: str = "Estimator <requester@acme.co.uk>",
 ) -> bytes:
     message = EmailMessage()
-    message["From"] = "Estimator <requester@acme.co.uk>"
+    message["From"] = from_value
     message["To"] = "sales@taperedplus.co.uk"
     message["Subject"] = "Project quote"
     message["Date"] = "Fri, 21 Aug 2026 11:00:00 +0100"
@@ -136,8 +138,15 @@ class FakeMonday:
 
 
 class FakePostcodeClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        requester_domain: str = "acme.co.uk",
+        company: str = "Acme",
+    ) -> None:
         self.extraction_count = 0
+        self.requester_domain = requester_domain
+        self.company = company
 
     def process_pdf(self, content: bytes, filename: str) -> str:
         del content, filename
@@ -161,16 +170,29 @@ class FakePostcodeClient:
         internal_company_aliases: tuple[str, ...] | list[str] = (),
     ) -> DesignParameterExtraction:
         assert "WA4 6NL" in context
-        assert requester_domain == "acme.co.uk"
+        assert requester_domain == self.requester_domain
         assert requester_source == "top_level_sender"
         del internal_company_aliases
         self.extraction_count += 1
-        return DesignParameterExtraction(post_code="WA4 6NL", company="Acme")
+        return DesignParameterExtraction(
+            post_code="WA4 6NL",
+            company=self.company,
+        )
 
 
 class FlakyAccountsClient:
-    def __init__(self, failures: int = 0) -> None:
+    def __init__(
+        self,
+        failures: int = 0,
+        *,
+        account_id: str = "99",
+        account_name: str = "Acme Limited",
+        account_domain: str = "acme.co.uk",
+    ) -> None:
         self.failures = failures
+        self.account_id = account_id
+        self.account_name = account_name
+        self.account_domain = account_domain
         self.page_calls = 0
 
     def load_accounts_page(
@@ -190,15 +212,15 @@ class FlakyAccountsClient:
             "cursor": None,
             "items": [
                 {
-                    "id": "99",
-                    "name": "Acme Limited",
+                    "id": self.account_id,
+                    "name": self.account_name,
                     "state": "active",
                     "board": {"id": str(BOARD_CONTRACT.accounts_board_id)},
                     "column_values": [
                         {
                             "id": BOARD_CONTRACT.account_email_domain_column_id,
                             "type": "text",
-                            "text": "acme.co.uk",
+                            "text": self.account_domain,
                         },
                         {
                             "id": BOARD_CONTRACT.account_duplicate_column_id,
@@ -263,6 +285,9 @@ def dependencies(
     accounts_client: FlakyAccountsClient,
     *,
     excluded_group_ids: tuple[str, ...] = (),
+    account_requester_domain_aliases: Mapping[
+        str, tuple[str, ...]
+    ] | None = None,
 ) -> PipelineDependencies:
     return PipelineDependencies(
         monday=monday,
@@ -275,6 +300,9 @@ def dependencies(
         publication_gate=PublicationGate(),
         internal_email_domains=("taperedplus.co.uk",),
         excluded_group_ids=excluded_group_ids,
+        account_requester_domain_aliases=(
+            account_requester_domain_aliases or {}
+        ),
     )
 
 
@@ -307,9 +335,65 @@ def test_shadow_pipeline_completes_without_monday_mutation(database) -> None:
         assert completed.result_json["publication"] == {
             "outcome": "shadow_skipped"
         }
+        assert completed.result_json["requester"]["websiteDomains"] == []
         assert item.postcode_result_json["labelId"] == 115
         assert item.account_match_json["accountItemId"] == "99"
         assert monday.mutations == []
+
+
+def test_account_alias_uses_corroborating_wrapped_signature_website(
+    database,
+) -> None:
+    content = eml_bytes(
+        (
+            "Please quote for the project at WA4 6NL.\n\n"
+            "Best Regards\nJamie Dunsmore\n"
+            "W: https://linkprotect.cudasvc.com/url?"
+            "a=https%3A%2F%2Faccuroof.co.uk&c=opaque\n"
+            "Registered company: SIG PLC"
+        ),
+        from_value='"Dunsmore, Jamie" <jamiedunsmore@sigplc.com>',
+    )
+    asset = identity(content)
+    job = add_claimed_job(database, asset)
+    monday = FakeMonday(sales_item(asset), content)
+
+    outcome = run_pipeline_job(
+        database,
+        job.id,
+        worker_id="worker-a",
+        dependencies=dependencies(
+            monday,
+            FakePostcodeClient(
+                requester_domain="sigplc.com",
+                company="SIG PLC",
+            ),
+            FlakyAccountsClient(
+                account_id="1661824807",
+                account_name="AccuRoof",
+                account_domain="accuroof.co.uk",
+            ),
+            account_requester_domain_aliases={
+                "1661824807": ("sigplc.com",),
+            },
+        ),
+        mode="shadow",
+        now=NOW,
+    )
+
+    with database() as session:
+        completed = session.get(ProcessingJob, job.id)
+        assert completed is not None
+        assert outcome == "shadow_completed"
+        assert completed.result_json["requester"]["websiteDomains"] == [
+            "accuroof.co.uk"
+        ]
+        assert completed.result_json["account"]["accountItemId"] == (
+            "1661824807"
+        )
+        assert completed.result_json["account"]["reason"] == (
+            "unique_domain_alias_website"
+        )
 
 
 def test_pipeline_checkpoints_do_not_persist_raw_email_content(database) -> None:

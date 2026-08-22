@@ -14,8 +14,8 @@ PROCESSING_PIPELINE_RELEASE = "sales-requester-v1"
 POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v3"
 POSTCODE_NORMALIZATION_REVISION = "postcode-area-v1"
 POSTCODE_LABEL_MAPPING_REVISION = "postcode-label-mapping-v1"
-REQUESTER_IDENTITY_REVISION = "requester-identity-v2"
-ACCOUNT_MATCHING_REVISION = "account-matching-v2"
+REQUESTER_IDENTITY_REVISION = "requester-identity-v3"
+ACCOUNT_MATCHING_REVISION = "account-matching-v3"
 DEFAULT_EXCLUDED_SALES_GROUP_IDS = ("group_mm5eqjq4",)
 DEFAULT_INTERNAL_COMPANY_ALIASES = (
     "TaperedPlus",

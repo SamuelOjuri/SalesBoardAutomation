@@ -51,6 +51,7 @@ from app.services.requester_identity import (
     RequesterIdentity,
     RequesterSource,
     extract_requester_identity,
+    normalize_domain,
 )
 from app.services.worker import complete_job, lock_owned_job, utc_now
 
@@ -663,6 +664,7 @@ def _requester_payload(requester: RequesterIdentity) -> dict[str, Any]:
         "domain": requester.domain,
         "company": requester.company,
         "source": requester.source,
+        "websiteDomains": list(requester.website_domains),
     }
 
 
@@ -673,11 +675,24 @@ def _requester_from_payload(value: object) -> RequesterIdentity:
         raise RuntimeError("requester checkpoint source is invalid")
     domain = payload.get("domain")
     company = payload.get("company")
+    raw_website_domains = payload.get("websiteDomains", [])
+    if not isinstance(raw_website_domains, list) or not all(
+        isinstance(value, str) for value in raw_website_domains
+    ):
+        raise RuntimeError("requester checkpoint website domains are invalid")
+    website_domains: list[str] = []
+    for value in raw_website_domains:
+        normalized = normalize_domain(value)
+        if normalized is None:
+            raise RuntimeError("requester checkpoint website domain is invalid")
+        if normalized not in website_domains:
+            website_domains.append(normalized)
     return RequesterIdentity(
         email_address=None,
         domain=str(domain) if domain is not None else None,
         company=str(company) if company is not None else None,
         source=cast(RequesterSource, source),
+        website_domains=tuple(website_domains),
     )
 
 

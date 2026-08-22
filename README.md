@@ -148,7 +148,11 @@ email providers are retained as requester addresses but are never automatic
 domain evidence. `REQUESTER_DOMAIN_ALIASES` is a JSON object of exact sender
 hosts to verified business domains. Exact-host scope preserves tenant evidence
 for approved relay services without treating every tenant on the relay's
-registrable domain as the same company.
+registrable domain as the same company. The selected sender's message section
+is also inspected deterministically for signature lines labelled `W`, `Web`, or
+`Website`. Direct HTTP(S) destinations and known Cuda LinkProtect or Microsoft
+Safe Links destinations are reduced to offline-normalized registrable domains;
+unlabelled legal links and websites in older quoted messages are ignored.
 
 `backend/app/services/accounts.py` loads every Accounts page through typed
 Monday column values, including the final page whose cursor is null. Only
@@ -160,9 +164,11 @@ be active and unflagged before publication.
 Direct domain matching remains the primary automatic Account rule.
 `ACCOUNT_REQUESTER_DOMAIN_ALIASES` is a JSON object keyed by Account item ID;
 each value is a list of independently verified requester domains. An
-Account-specific alias can match only when the alias identifies one eligible
-Account and the extracted company is also one unique exact normalized name for
-that same Account. Alias-only or conflicting evidence remains unresolved.
+Account-specific alias can match only when the requester domain is approved and
+an explicit signature website domain equals that eligible Account's stored
+email domain. A unique exact company name may agree with that decision, but a
+name identifying another Account blocks it. Alias-only, wrapper-only, and
+conflicting evidence remains unresolved.
 
 Generate a fresh JSON export of the complete Accounts board from the repository
 root with:
