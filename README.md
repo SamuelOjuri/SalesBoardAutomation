@@ -147,6 +147,20 @@ eligible. Complete indexes are cached for five minutes. A selected Account is
 always re-fetched, must belong to the configured Accounts board, and must still
 be active and unflagged before publication.
 
+Generate a fresh JSON export of the complete Accounts board from the repository
+root with:
+
+```powershell
+$env:PYTHONPATH = "backend"
+python -m app.accounts_export --output data/AccountsBoardData.json
+```
+
+The command follows each returned cursor and stops only after Monday returns a
+null cursor. The output includes active, archived, and duplicate-marked items,
+along with a total `count`. Add `--eligible-only` to export only active Accounts
+that are not marked with Duplicate label ID `1`. Omit `--output` to write the
+JSON to standard output.
+
 ## Safe Monday publication
 
 `backend/app/services/publication.py` is the Phase 6 write boundary. It
