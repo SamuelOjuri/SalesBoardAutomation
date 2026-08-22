@@ -5,6 +5,7 @@ from app.services.postcode import (
     DesignParameterExtraction,
     extract_parameters,
     extract_postcode_area,
+    extract_structured_project_area,
     format_dropdown_for_monday,
     resolve_postcode_label,
     validate_company_evidence,
@@ -85,6 +86,46 @@ def test_live_dropdown_maps_wa_to_label_115() -> None:
     assert format_dropdown_for_monday("WA4 6NL", postcode_column()) == {
         "ids": [115]
     }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Project: Luton Sixth Form College, LU",
+        "PROJECT DETAILS\nLuton Sixth Form College, LU\nReference: TP18491",
+        "Project:\nLuton Sixth Form College,\nLU\nReference: TP18491",
+    ],
+)
+def test_structured_project_area_accepts_only_explicit_project_suffix(
+    content: str,
+) -> None:
+    assert extract_structured_project_area(content) == "LU"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Subject: Revision Request - Luton College",
+        "The project is at Luton Sixth Form College.",
+        "Filename: Luton Sixth Form College_ LU.pdf",
+        "Project: Luton Sixth Form College",
+        "Project address: Luton Sixth Form College, LU",
+        "Project: First College, LU\nProject: Second College, HP",
+    ],
+)
+def test_structured_project_area_rejects_inference_and_ambiguity(
+    content: str,
+) -> None:
+    assert extract_structured_project_area(content) is None
+
+
+def test_conflicting_model_and_structured_project_areas_fail_closed() -> None:
+    extracted = DesignParameterExtraction(post_code="WA4 6NL", company=None)
+
+    assert extract_parameters(
+        "Project: Luton Sixth Form College, LU",
+        extracted_parameters=extracted,
+    ) == {"Post Code": "Not provided"}
 
 
 def test_legacy_name_dropdown_label_remains_supported() -> None:

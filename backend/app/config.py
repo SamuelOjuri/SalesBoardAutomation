@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REFERENCE_IMPLEMENTATION_COMMIT = "ef321095ed96a7dde6543b89da58b2689e76a53d"
 PROCESSING_PIPELINE_RELEASE = "sales-requester-v1"
-POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v3"
+POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v4"
 POSTCODE_NORMALIZATION_REVISION = "postcode-area-v1"
 POSTCODE_LABEL_MAPPING_REVISION = "postcode-label-mapping-v1"
 REQUESTER_IDENTITY_REVISION = "requester-identity-v3"

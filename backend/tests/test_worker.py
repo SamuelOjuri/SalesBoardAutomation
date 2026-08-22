@@ -15,6 +15,7 @@ from app.models import (
     ProcessingJobStage,
     ProcessingJobStatus,
 )
+from app.services.email_parser import AttachmentExtractionError
 from app.services.worker import (
     JobLeaseError,
     claim_next_job,
@@ -218,6 +219,65 @@ def test_worker_logs_only_error_type_not_sensitive_message(
     assert failure_record.error_type == "RuntimeError"  # type: ignore[attr-defined]
     assert sensitive_marker not in caplog.text
     assert sensitive_marker not in str(failure_record.__dict__)
+
+
+def test_supported_attachment_extraction_failure_is_retried(
+    session_factory,
+) -> None:
+    with session_factory() as session:
+        job = add_job(session, item_id="352")
+        job_id = job.id
+        session.commit()
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://user:password@localhost/sales",
+        monday_ingestion_access_token="token",
+        monday_webhook_shared_secret="shared-secret",
+        gemini_api_key="gemini-key",
+        gemini_model="gemini-test-model",
+        processing_pipeline_version=build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
+        processing_mode="shadow",
+        worker_heartbeat_interval_seconds=1,
+        worker_lease_timeout_seconds=10,
+    )
+    runtime = WorkerRuntime(
+        settings=settings,
+        engine=cast(Any, session_factory.kw["bind"]),
+        session_factory=session_factory,
+        monday_client=cast(Any, None),
+        dependencies=cast(Any, None),
+        worker_id="worker-attachment-retry-test",
+    )
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AttachmentExtractionError(
+            "supported .pdf attachment text extraction failed"
+        )
+
+    assert process_next_job(
+        runtime,
+        pipeline_runner=fail_pipeline,
+        now=NOW,
+    )
+
+    with session_factory() as session:
+        retried = session.get(ProcessingJob, job_id)
+        assert retried is not None
+        assert retried.status == ProcessingJobStatus.RETRY_WAIT.value
+        assert retried.attempt_count == 1
+        assert retried.last_error == "AttachmentExtractionError"
+        assert retried.next_retry_at is not None
+        failure_audit = (
+            session.query(ProcessingAudit)
+            .filter_by(job_id=job_id, event_type="worker_failure")
+            .one()
+        )
+        assert failure_audit.outcome == "retry_scheduled"
+        assert failure_audit.details_json["retryDelaySeconds"] == 30
 
 
 def test_stale_worker_recovery_retries_or_exhausts_job(session_factory) -> None:

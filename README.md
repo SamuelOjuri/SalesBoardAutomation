@@ -105,8 +105,10 @@ multimodal client. Inline images are excluded by default so internal signature
 logos cannot become requester-company evidence. DOCX text is extracted locally
 from bounded WordprocessingML document, header, footer, footnote, and endnote
 parts; archive-member, expanded-size, and XML-part limits fail closed on unsafe
-or malformed files. Files are processed in numeric asset-ID order, and their
-size and SHA-256 are revalidated immediately before parsing.
+or malformed files. If extraction of a supported PDF, DOCX, or non-inline image
+fails, the worker retries the job instead of completing from partial evidence.
+Files are processed in numeric asset-ID order, and their size and SHA-256 are
+revalidated immediately before parsing.
 
 `backend/app/services/postcode.py` sends the combined untrusted content to the
 configured Gemini model using a strict Pydantic response schema that can
@@ -118,6 +120,13 @@ postcode selection. Model-supplied company evidence is accepted only when it
 occurs as consecutive whole tokens in the extracted content and is not listed
 in `INTERNAL_COMPANY_ALIASES`. Company is secondary account-matching evidence
 only. Malformed or augmented model output is rejected.
+
+When the model omits a postcode, a deterministic fallback accepts only a
+one- or two-letter area explicitly written as a comma-separated suffix in a
+structured `Project`, `Project Name`, or `Project Details` field (for example,
+`Project: Luton Sixth Form College, LU`). It never derives an area from a place
+name, subject, filename, address, or prose. Conflicting structured candidates,
+or a disagreement between the model and the structured field, fail closed.
 
 The extracted postcode is reduced to its alphabetic area using the pinned
 reference behavior. `MondayClient.load_postcode_dropdown_column` obtains the

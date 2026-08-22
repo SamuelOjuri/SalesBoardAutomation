@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.input_revision import EmailAssetIdentity
 from app.services.email_parser import (
+    AttachmentExtractionError,
     EmailAttachment,
     extract_docx_text,
     extract_text_from_email,
@@ -290,6 +291,59 @@ def test_project_postcode_can_come_only_from_docx_attachment(tmp_path: Path) -> 
     assert "Project delivery location\nHP3 0NZ" in client.context
     assert result.area == "HP"
     assert result.label_id == 48
+
+
+def test_explicit_project_field_area_is_used_when_model_returns_null(
+    tmp_path: Path,
+) -> None:
+    content = _eml_bytes(
+        "Please see the attached project documents.",
+        pdf_content=(
+            b"PROJECT DETAILS\nLuton Sixth Form College, LU\n"
+            b"Reference: TP18491"
+        ),
+    )
+    asset = _downloaded_asset(tmp_path, asset_id="11", content=content)
+    client = FakeExtractionClient(None, "AccuRoof")
+    postcode_column = _postcode_column()
+    postcode_column["settings"] = {
+        "labels": [{"id": 67, "label": "LU", "is_deactivated": False}]
+    }
+
+    result = analyze_downloaded_email_assets(
+        [asset], client=client, postcode_column=postcode_column
+    )
+
+    assert result.outcome == "resolved"
+    assert result.area == "LU"
+    assert result.label_id == 67
+
+
+def test_supported_attachment_extraction_failure_is_propagated(
+    tmp_path: Path,
+) -> None:
+    class FailingExtractionClient(FakeExtractionClient):
+        def process_pdf(self, content: bytes, filename: str) -> str:
+            del content, filename
+            raise TimeoutError("upstream extraction unavailable")
+
+    content = _eml_bytes(
+        "Please see the attached drawing.",
+        pdf_content=b"project evidence",
+    )
+    asset = _downloaded_asset(tmp_path, asset_id="12", content=content)
+
+    with pytest.raises(
+        AttachmentExtractionError,
+        match=r"supported \.pdf attachment text extraction failed",
+    ) as captured:
+        analyze_downloaded_email_assets(
+            [asset],
+            client=FailingExtractionClient(None),
+            postcode_column=_postcode_column(),
+        )
+
+    assert isinstance(captured.value.__cause__, TimeoutError)
 
 
 def test_docx_parser_rejects_non_ooxml_content() -> None:

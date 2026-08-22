@@ -53,6 +53,10 @@ class AttachmentTextExtractor(Protocol):
     ) -> str: ...
 
 
+class AttachmentExtractionError(RuntimeError):
+    """Raised when a supported attachment cannot be safely converted to text."""
+
+
 @dataclass(frozen=True, slots=True)
 class EmailAttachment:
     filename: str
@@ -121,6 +125,21 @@ def extract_text_from_email(
     sections = [f"EMAIL CONTENT:\n{email_text}"]
     for attachment in attachments:
         suffix = PurePath(attachment.filename).suffix.casefold()
+        if (
+            suffix in _IMAGE_EXTENSIONS
+            and attachment.inline
+            and not include_inline_images
+        ):
+            sections.append(
+                f"INLINE IMAGE ({attachment.filename}) "
+                "[not processed: signature-safe policy]"
+            )
+            continue
+        if suffix not in {".pdf", ".docx", *_IMAGE_EXTENSIONS}:
+            sections.append(
+                f"ATTACHMENT ({attachment.filename}) [not processed: unsupported type]"
+            )
+            continue
         try:
             if suffix == ".pdf":
                 text = extractor.process_pdf(
@@ -134,13 +153,7 @@ def extract_text_from_email(
                 sections.append(
                     f"DOCX ATTACHMENT ({attachment.filename}):\n{text}"
                 )
-            elif suffix in _IMAGE_EXTENSIONS:
-                if attachment.inline and not include_inline_images:
-                    sections.append(
-                        f"INLINE IMAGE ({attachment.filename}) "
-                        "[not processed: signature-safe policy]"
-                    )
-                    continue
+            else:
                 image_type = "INLINE IMAGE" if attachment.inline else "ATTACHMENT"
                 text = extractor.process_image(
                     attachment.content,
@@ -150,14 +163,10 @@ def extract_text_from_email(
                 sections.append(
                     f"{image_type} ({attachment.filename}):\n{text}"
                 )
-            else:
-                sections.append(
-                    f"ATTACHMENT ({attachment.filename}) [not processed: unsupported type]"
-                )
-        except Exception:
-            sections.append(
-                f"ATTACHMENT ({attachment.filename}) [processing failed]"
-            )
+        except Exception as error:
+            raise AttachmentExtractionError(
+                f"supported {suffix} attachment text extraction failed"
+            ) from error
     return "\n\n".join(sections)
 
 
