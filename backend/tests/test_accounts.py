@@ -277,6 +277,76 @@ def test_ambiguous_domain_match_is_unresolved() -> None:
     assert result.domain_candidate_ids == ("10", "20")
 
 
+def test_shared_domain_is_disambiguated_by_unique_exact_name() -> None:
+    index = AccountsIndex(
+        (
+            _record(
+                "10",
+                "M. K. M Building Supplies Limited",
+                domain="mkm.com",
+            ),
+            _record(
+                "20",
+                "M. K. M Building Supplies (Holdings) Limited",
+                domain="mkm.com",
+            ),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(
+            domain="mkm.com",
+            company="M. K. M Building Supplies (Holdings) Ltd",
+        ),
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("20")
+    assert result.reason == "unique_domain_and_name"
+    assert result.domain_candidate_ids == ("10", "20")
+    assert result.name_candidate_ids == ("20",)
+
+
+def test_shared_domain_remains_unresolved_when_name_matches_neither_candidate() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme North", domain="acme.co.uk"),
+            _record("20", "Acme South", domain="acme.co.uk"),
+            _record("30", "Other Roofing", domain="other.co.uk"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company="Other Roofing"),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.domain_candidate_ids == ("10", "20")
+    assert result.name_candidate_ids == ("30",)
+
+
+def test_shared_domain_remains_unresolved_when_name_is_not_unique_within_domain() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme Limited", domain="acme.co.uk"),
+            _record("20", "Acme PLC", domain="acme.co.uk"),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company="Acme Ltd"),
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.domain_candidate_ids == ("10", "20")
+    assert result.name_candidate_ids == ("10", "20")
+
+
 def test_unique_domain_match_does_not_require_company_evidence() -> None:
     index = AccountsIndex(
         (_record("10", "Acme Roofing", domain="acme.co.uk"),)

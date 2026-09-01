@@ -17,6 +17,7 @@ from app.services.requester_identity import RequesterIdentity, normalize_domain
 
 AccountMatchReason = Literal[
     "unique_domain",
+    "unique_domain_and_name",
     "unique_domain_alias_website",
     "unique_exact_name",
     "not_found_or_ambiguous",
@@ -141,6 +142,9 @@ def match_account(
         if normalized_company is not None
         and normalize_account_name(account.name) == normalized_company
     )
+    direct_domain_name_matches = tuple(
+        account for account in direct_domain_matches if account in name_matches
+    )
 
     if (
         len(domain_matches) == 1
@@ -149,6 +153,16 @@ def match_account(
     ):
         return _match_result(
             domain_matches[0], "unique_domain", domain_matches, name_matches
+        )
+    if (
+        len(direct_domain_matches) > 1
+        and len(direct_domain_name_matches) == 1
+    ):
+        return _match_result(
+            direct_domain_name_matches[0],
+            "unique_domain_and_name",
+            domain_matches,
+            name_matches,
         )
     if (
         not direct_domain_matches
@@ -203,6 +217,7 @@ def _match_result(
     account: AccountRecord,
     reason: Literal[
         "unique_domain",
+        "unique_domain_and_name",
         "unique_domain_alias_website",
         "unique_exact_name",
     ],

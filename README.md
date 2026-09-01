@@ -171,6 +171,9 @@ always re-fetched, must belong to the configured Accounts board, and must still
 be active and unflagged before publication.
 
 Direct domain matching remains the primary automatic Account rule.
+When more than one eligible Account has the requester's direct domain, a unique
+exact normalized company-name match within those domain candidates resolves the
+Account; missing, unmatched, or non-unique name evidence remains unresolved.
 `ACCOUNT_REQUESTER_DOMAIN_ALIASES` is a JSON object keyed by Account item ID;
 each value is a list of independently verified requester domains. An
 Account-specific alias can match only when the requester domain is approved and
