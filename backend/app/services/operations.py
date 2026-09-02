@@ -73,7 +73,11 @@ def enqueue_sales_item(
     excluded_group_ids: Sequence[str] = (),
     now: datetime | None = None,
 ) -> IntakeQueueResult:
-    snapshot = _authoritative_snapshot(client, item_id)
+    snapshot = _authoritative_snapshot(
+        client,
+        item_id,
+        excluded_group_ids=excluded_group_ids,
+    )
     if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):
         raise ValueError("Sales item belongs to an excluded group")
     if not snapshot.active or not snapshot.email_assets:
@@ -98,7 +102,11 @@ def reconcile_sales_item(
     now: datetime | None = None,
 ) -> ReconcileResult:
     reconciled_at = now or utc_now()
-    snapshot = _authoritative_snapshot(client, item_id)
+    snapshot = _authoritative_snapshot(
+        client,
+        item_id,
+        excluded_group_ids=excluded_group_ids,
+    )
     group_excluded = is_excluded_sales_group(
         snapshot.group_id,
         excluded_group_ids,
@@ -319,10 +327,13 @@ def collect_processing_metrics(
 def _authoritative_snapshot(
     client: IntakeItemReader,
     item_id: str,
+    *,
+    excluded_group_ids: Sequence[str] = (),
 ) -> SalesItemSnapshot:
     snapshot = parse_sales_item_snapshot(
         client.load_sales_item_intake(str(item_id)),
         contract=BOARD_CONTRACT,
+        excluded_group_ids=excluded_group_ids,
     )
     if snapshot.item_id != str(item_id):
         raise ValueError("Monday returned the wrong Sales item")

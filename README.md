@@ -261,7 +261,9 @@ does not enqueue an authoritative item whose current group ID is listed in
 `PROCESSING_EXCLUDED_GROUP_IDS`. The worker rechecks the group before each
 remaining stage and cancels a queued job as ineligible if the item has moved
 into an excluded group. Publication performs the same authoritative check
-immediately before any write.
+immediately before any write. Excluded-group classification requires only the
+authoritative item, board, group, and state; omitted Email File or publication
+columns do not turn a Completed Folder move into a retryable processing error.
 
 Run a background worker from the repository root:
 

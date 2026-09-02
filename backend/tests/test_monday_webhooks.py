@@ -255,6 +255,7 @@ def test_excluded_authoritative_group_does_not_enqueue(
     monday_client.item = intake_item(
         group_id=DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
     )
+    monday_client.item["column_values"] = []
 
     response = post_requests(
         application, [(webhook_payload(), shared_secret_headers())]

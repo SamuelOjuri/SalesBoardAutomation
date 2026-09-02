@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.config import BOARD_CONTRACT
+from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
 from app.models import (
     ProcessingItem,
@@ -97,6 +97,21 @@ class InactiveMonday:
         }
 
 
+class ExcludedMonday:
+    def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]:
+        return {
+            "id": item_id,
+            "state": "active",
+            "board": {"id": str(BOARD_CONTRACT.sales_board_id)},
+            "group": {
+                "id": DEFAULT_EXCLUDED_SALES_GROUP_IDS[0],
+                "title": "Completed Folder",
+            },
+            "assets": [],
+            "column_values": [],
+        }
+
+
 def test_retry_failed_job_clones_saved_stage_as_new_identity_owner(
     session_factory,
 ) -> None:
@@ -160,6 +175,36 @@ def test_reconcile_ineligible_item_cancels_scheduled_job(session_factory) -> Non
 
         assert result.outcome == "ineligible"
         assert job.status == ProcessingJobStatus.CANCELLED.value
+        assert job.item.state == ProcessingItemState.INELIGIBLE.value
+        assert job.item.latest_input_revision is None
+        assert job.item.latest_pipeline_version is None
+
+
+def test_reconcile_excluded_item_without_email_column_marks_ineligible(
+    session_factory,
+) -> None:
+    excluded_group_id = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+    with session_factory() as session:
+        job = add_job(
+            session,
+            item_id="76",
+            status=ProcessingJobStatus.FAILED.value,
+        )
+        session.commit()
+
+        result = reconcile_sales_item(
+            session,
+            ExcludedMonday(),
+            "76",
+            pipeline_version="test-v1",
+            excluded_group_ids=(excluded_group_id,),
+            now=NOW,
+        )
+        session.commit()
+
+        assert result.outcome == "ineligible"
+        assert result.job_id is None
+        assert job.status == ProcessingJobStatus.FAILED.value
         assert job.item.state == ProcessingItemState.INELIGIBLE.value
         assert job.item.latest_input_revision is None
         assert job.item.latest_pipeline_version is None

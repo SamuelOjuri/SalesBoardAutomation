@@ -204,7 +204,11 @@ def _run_extraction_stage(
     now: datetime,
 ) -> bool:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(dependencies.monday, job.item_id)
+    snapshot = _load_snapshot(
+        dependencies.monday,
+        job.item_id,
+        excluded_group_ids=dependencies.excluded_group_ids,
+    )
     if not _snapshot_matches_job(
         snapshot,
         job,
@@ -284,6 +288,7 @@ def _run_matching_stage(
         dependencies.monday,
         job.item_id,
         require_download_urls=False,
+        excluded_group_ids=dependencies.excluded_group_ids,
     )
     if not _snapshot_matches_job(
         snapshot,
@@ -351,6 +356,7 @@ def _run_validation_stage(
         dependencies.monday,
         job.item_id,
         require_download_urls=False,
+        excluded_group_ids=dependencies.excluded_group_ids,
     )
     if not _snapshot_matches_job(
         snapshot,
@@ -464,7 +470,11 @@ def _replace_with_authoritative_input(
     now: datetime,
 ) -> None:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(dependencies.monday, job.item_id)
+    snapshot = _load_snapshot(
+        dependencies.monday,
+        job.item_id,
+        excluded_group_ids=dependencies.excluded_group_ids,
+    )
     _replace_with_snapshot(
         session_factory,
         job_id,
@@ -539,11 +549,13 @@ def _load_snapshot(
     item_id: str,
     *,
     require_download_urls: bool = True,
+    excluded_group_ids: Sequence[str] = (),
 ) -> SalesItemSnapshot:
     return parse_sales_item_snapshot(
         monday.load_sales_item_intake(item_id),
         contract=BOARD_CONTRACT,
         require_download_urls=require_download_urls,
+        excluded_group_ids=excluded_group_ids,
     )
 
 

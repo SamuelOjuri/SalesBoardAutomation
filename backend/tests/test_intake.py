@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.config import BOARD_CONTRACT
+from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
 from app.models import ProcessingAudit, ProcessingJob, WebhookEvent
 from app.services.intake import (
@@ -75,6 +75,33 @@ def test_snapshot_does_not_use_assets_outside_email_file_membership() -> None:
     snapshot = parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
 
     assert snapshot.email_assets == ()
+
+
+def test_excluded_group_snapshot_does_not_require_email_file_column() -> None:
+    excluded_group_id = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+    raw_item = item_snapshot()
+    raw_item["group"]["id"] = excluded_group_id
+    raw_item["column_values"] = []
+
+    snapshot = parse_sales_item_snapshot(
+        raw_item,
+        contract=BOARD_CONTRACT,
+        excluded_group_ids=(excluded_group_id,),
+    )
+
+    assert snapshot.group_id == excluded_group_id
+    assert snapshot.email_assets == ()
+
+
+def test_eligible_group_snapshot_still_requires_email_file_column() -> None:
+    raw_item = item_snapshot()
+    raw_item["column_values"] = []
+
+    with pytest.raises(IntakeContractError) as captured:
+        parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
+
+    assert captured.value.code == "email_file_column_missing"
+    assert captured.value.retryable is True
 
 
 def test_snapshot_requires_an_authoritative_group() -> None:

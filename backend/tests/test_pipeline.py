@@ -580,8 +580,10 @@ def test_excluded_group_cancels_queued_job_before_processing(database) -> None:
     asset = identity(content)
     job = add_claimed_job(database, asset)
     excluded_group_id = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+    excluded_item = sales_item(asset, group_id=excluded_group_id)
+    excluded_item["column_values"] = []
     monday = FakeMonday(
-        sales_item(asset, group_id=excluded_group_id),
+        excluded_item,
         content,
     )
     accounts_client = FlakyAccountsClient()

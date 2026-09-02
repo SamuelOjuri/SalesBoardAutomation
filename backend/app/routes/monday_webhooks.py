@@ -149,7 +149,9 @@ def monday_webhook(
             normalized.item_id
         )
         snapshot = parse_sales_item_snapshot(
-            raw_item, contract=settings.board_contract
+            raw_item,
+            contract=settings.board_contract,
+            excluded_group_ids=settings.processing_excluded_group_ids,
         )
         if snapshot.board_id != str(settings.sales_board_id):
             _finish_event(request, event.id)

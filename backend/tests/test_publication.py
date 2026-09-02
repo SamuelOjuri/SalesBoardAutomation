@@ -283,9 +283,9 @@ def test_changed_input_revision_blocks_all_writes() -> None:
 
 def test_excluded_group_blocks_all_writes() -> None:
     excluded_group_id = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
-    client = FakePublicationClient(
-        [_sales_item(group_id=excluded_group_id)]
-    )
+    excluded_item = _sales_item(group_id=excluded_group_id)
+    excluded_item["column_values"] = []
+    client = FakePublicationClient([excluded_item])
 
     with pytest.raises(StalePublicationError, match="excluded group"):
         publish_sales_item(

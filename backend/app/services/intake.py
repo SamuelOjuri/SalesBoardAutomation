@@ -107,6 +107,7 @@ def parse_sales_item_snapshot(
     *,
     contract: BoardContract,
     require_download_urls: bool = True,
+    excluded_group_ids: Sequence[str] = (),
 ) -> SalesItemSnapshot:
     item_id = _positive_decimal_id(raw_item.get("id"), "item ID")
     board = _mapping(raw_item.get("board"), "item board")
@@ -118,6 +119,14 @@ def parse_sales_item_snapshot(
         raise IntakeSnapshotUnavailable(
             "Monday item state is missing",
             code="item_state_missing",
+        )
+    if is_excluded_sales_group(group_id, excluded_group_ids):
+        return SalesItemSnapshot(
+            board_id=board_id,
+            item_id=item_id,
+            group_id=group_id,
+            active=state.casefold() == "active",
+            email_assets=(),
         )
 
     columns = raw_item.get("column_values")

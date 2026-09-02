@@ -211,13 +211,26 @@ def publish_sales_item(
 
 def parse_sales_publication_snapshot(
     raw_item: Mapping[str, Any],
+    *,
+    excluded_group_ids: Sequence[str] = (),
 ) -> SalesPublicationSnapshot:
     try:
         intake = parse_sales_item_snapshot(
             raw_item,
             contract=BOARD_CONTRACT,
             require_download_urls=False,
+            excluded_group_ids=excluded_group_ids,
         )
+        if is_excluded_sales_group(intake.group_id, excluded_group_ids):
+            return SalesPublicationSnapshot(
+                item_id=intake.item_id,
+                board_id=intake.board_id,
+                group_id=intake.group_id,
+                active=intake.active,
+                input_revision="",
+                postcode_label_ids=(),
+                linked_account_item_ids=(),
+            )
         input_revision = compute_input_revision(
             asset.identity for asset in intake.email_assets
         )
@@ -260,7 +273,8 @@ def _load_current_snapshot(
     excluded_group_ids: Sequence[str] = (),
 ) -> SalesPublicationSnapshot:
     snapshot = parse_sales_publication_snapshot(
-        client.load_sales_item_for_publication(item_id)
+        client.load_sales_item_for_publication(item_id),
+        excluded_group_ids=excluded_group_ids,
     )
     if snapshot.item_id != item_id:
         raise PublicationContractError("Monday returned the wrong Sales item")
