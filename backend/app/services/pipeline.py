@@ -501,15 +501,25 @@ def _replace_with_snapshot(
             snapshot.group_id,
             excluded_group_ids,
         )
+        board_moved = snapshot.board_id != job.board_id
         replacement_revision = (
             compute_input_revision(asset.identity for asset in snapshot.email_assets)
-            if snapshot.active and snapshot.email_assets and not group_excluded
+            if (
+                not board_moved
+                and snapshot.active
+                and snapshot.email_assets
+                and not group_excluded
+            )
             else None
         )
         job.status = ProcessingJobStatus.CANCELLED.value
         job.completed_at = now
         job.superseded_by_revision = replacement_revision
-        job.last_error = "GroupExcluded" if group_excluded else "InputSuperseded"
+        job.last_error = (
+            "BoardMoved"
+            if board_moved
+            else "GroupExcluded" if group_excluded else "InputSuperseded"
+        )
         job.locked_at = None
         job.locked_by = None
         job.heartbeat_at = None
@@ -517,9 +527,18 @@ def _replace_with_snapshot(
             session,
             item,
             job,
-            event_type=("group_exclusion" if group_excluded else "input_supersession"),
-            outcome=("excluded_group" if group_excluded else "cancelled"),
+            event_type=(
+                "board_movement"
+                if board_moved
+                else "group_exclusion" if group_excluded else "input_supersession"
+            ),
+            outcome=(
+                "moved_from_managed_board"
+                if board_moved
+                else "excluded_group" if group_excluded else "cancelled"
+            ),
             details={
+                "authoritativeBoardId": snapshot.board_id,
                 "groupId": snapshot.group_id,
                 "supersededByRevision": replacement_revision,
             },

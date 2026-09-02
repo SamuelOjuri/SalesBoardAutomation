@@ -221,7 +221,10 @@ def parse_sales_publication_snapshot(
             require_download_urls=False,
             excluded_group_ids=excluded_group_ids,
         )
-        if is_excluded_sales_group(intake.group_id, excluded_group_ids):
+        if (
+            intake.board_id != str(BOARD_CONTRACT.sales_board_id)
+            or is_excluded_sales_group(intake.group_id, excluded_group_ids)
+        ):
             return SalesPublicationSnapshot(
                 item_id=intake.item_id,
                 board_id=intake.board_id,
@@ -279,9 +282,7 @@ def _load_current_snapshot(
     if snapshot.item_id != item_id:
         raise PublicationContractError("Monday returned the wrong Sales item")
     if snapshot.board_id != str(BOARD_CONTRACT.sales_board_id):
-        raise PublicationContractError(
-            "Monday returned the Sales item from the wrong board"
-        )
+        raise StalePublicationError("Sales item moved from the managed board")
     if not snapshot.active:
         raise StalePublicationError("Sales item is no longer active")
     if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):

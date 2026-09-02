@@ -78,6 +78,8 @@ def enqueue_sales_item(
         item_id,
         excluded_group_ids=excluded_group_ids,
     )
+    if snapshot.board_id != str(BOARD_CONTRACT.sales_board_id):
+        raise ValueError("Monday returned a Sales item from the wrong board")
     if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):
         raise ValueError("Sales item belongs to an excluded group")
     if not snapshot.active or not snapshot.email_assets:
@@ -107,11 +109,18 @@ def reconcile_sales_item(
         item_id,
         excluded_group_ids=excluded_group_ids,
     )
+    managed_board_id = str(BOARD_CONTRACT.sales_board_id)
+    board_managed = snapshot.board_id == managed_board_id
     group_excluded = is_excluded_sales_group(
         snapshot.group_id,
         excluded_group_ids,
     )
-    if snapshot.active and snapshot.email_assets and not group_excluded:
+    if (
+        board_managed
+        and snapshot.active
+        and snapshot.email_assets
+        and not group_excluded
+    ):
         queued = queue_sales_item_snapshot(
             session,
             snapshot,
@@ -129,12 +138,12 @@ def reconcile_sales_item(
 
     item = _locked_processing_item(
         session,
-        board_id=snapshot.board_id,
+        board_id=managed_board_id,
         item_id=snapshot.item_id,
     )
     if item is None:
         item = ProcessingItem(
-            board_id=snapshot.board_id,
+            board_id=managed_board_id,
             item_id=snapshot.item_id,
             state=ProcessingItemState.INELIGIBLE.value,
         )
@@ -149,7 +158,7 @@ def reconcile_sales_item(
             continue
         job.status = ProcessingJobStatus.CANCELLED.value
         job.completed_at = reconciled_at
-        job.last_error = "InputIneligible"
+        job.last_error = "InputIneligible" if board_managed else "BoardMoved"
         job.locked_at = None
         job.locked_by = None
         job.heartbeat_at = None
@@ -158,8 +167,12 @@ def reconcile_sales_item(
             item,
             job,
             event_type="operator_reconcile",
-            outcome="cancelled_ineligible",
-            details={},
+            outcome=(
+                "cancelled_ineligible"
+                if board_managed
+                else "cancelled_moved_from_managed_board"
+            ),
+            details={"authoritativeBoardId": snapshot.board_id},
         )
 
     item.latest_input_revision = None
@@ -171,9 +184,11 @@ def reconcile_sales_item(
         item,
         running_job,
         event_type="operator_reconcile",
-        outcome="ineligible",
+        outcome=("ineligible" if board_managed else "moved_from_managed_board"),
         details={
             "active": snapshot.active,
+            "authoritativeBoardId": snapshot.board_id,
+            "boardManaged": board_managed,
             "groupExcluded": group_excluded,
             "groupId": snapshot.group_id,
         },
@@ -337,8 +352,6 @@ def _authoritative_snapshot(
     )
     if snapshot.item_id != str(item_id):
         raise ValueError("Monday returned the wrong Sales item")
-    if snapshot.board_id != str(BOARD_CONTRACT.sales_board_id):
-        raise ValueError("Monday returned a Sales item from the wrong board")
     return snapshot
 
 

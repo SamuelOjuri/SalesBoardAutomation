@@ -271,6 +271,28 @@ def test_excluded_authoritative_group_does_not_enqueue(
         assert session.query(ProcessingJob).count() == 0
 
 
+def test_moved_authoritative_item_does_not_enqueue(
+    webhook_application: tuple[Any, ...]
+) -> None:
+    application, engine, monday_client = webhook_application
+    monday_client.item = intake_item(group_id="group_mkpbd6vy")
+    monday_client.item["board"]["id"] = "1882196103"
+    monday_client.item["column_values"] = []
+
+    response = post_requests(
+        application, [(webhook_payload(), shared_secret_headers())]
+    )[0]
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    assert response.json()["reason"] == "board_not_managed"
+    with create_session_factory(engine)() as session:
+        event = session.query(WebhookEvent).one()
+        assert event.authenticated is True
+        assert event.status == WebhookEventStatus.PROCESSED.value
+        assert session.query(ProcessingJob).count() == 0
+
+
 def test_wrong_board_or_column_is_persisted_without_refetching(
     webhook_application: tuple[Any, ...]
 ) -> None:

@@ -8,6 +8,7 @@ import pytest
 from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
 from app.models import (
+    ProcessingAudit,
     ProcessingItem,
     ProcessingItemState,
     ProcessingJob,
@@ -112,6 +113,18 @@ class ExcludedMonday:
         }
 
 
+class MovedMonday:
+    def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]:
+        return {
+            "id": item_id,
+            "state": "active",
+            "board": {"id": "1882196103"},
+            "group": {"id": "group_mkpbd6vy", "title": "Landing Zone"},
+            "assets": [],
+            "column_values": [],
+        }
+
+
 def test_retry_failed_job_clones_saved_stage_as_new_identity_owner(
     session_factory,
 ) -> None:
@@ -208,6 +221,52 @@ def test_reconcile_excluded_item_without_email_column_marks_ineligible(
         assert job.item.state == ProcessingItemState.INELIGIBLE.value
         assert job.item.latest_input_revision is None
         assert job.item.latest_pipeline_version is None
+
+
+def test_reconcile_moved_item_uses_original_board_identity(session_factory) -> None:
+    with session_factory() as session:
+        job = add_job(
+            session,
+            item_id="77",
+            status=ProcessingJobStatus.FAILED.value,
+        )
+        session.commit()
+
+        result = reconcile_sales_item(
+            session,
+            MovedMonday(),
+            "77",
+            pipeline_version="test-v1",
+            now=NOW,
+        )
+        session.commit()
+
+        audit = (
+            session.query(ProcessingAudit)
+            .filter_by(
+                board_id=str(BOARD_CONTRACT.sales_board_id),
+                item_id="77",
+                event_type="operator_reconcile",
+                outcome="moved_from_managed_board",
+            )
+            .one()
+        )
+        items = session.query(ProcessingItem).all()
+        assert result.outcome == "ineligible"
+        assert result.job_id is None
+        assert job.status == ProcessingJobStatus.FAILED.value
+        assert job.item.state == ProcessingItemState.INELIGIBLE.value
+        assert job.item.latest_input_revision is None
+        assert job.item.latest_pipeline_version is None
+        assert len(items) == 1
+        assert items[0].board_id == str(BOARD_CONTRACT.sales_board_id)
+        assert audit.details_json == {
+            "active": True,
+            "authoritativeBoardId": "1882196103",
+            "boardManaged": False,
+            "groupExcluded": False,
+            "groupId": "group_mkpbd6vy",
+        }
 
 
 def test_metrics_report_queue_age_stages_and_stale_leases(session_factory) -> None:

@@ -120,7 +120,10 @@ def parse_sales_item_snapshot(
             "Monday item state is missing",
             code="item_state_missing",
         )
-    if is_excluded_sales_group(group_id, excluded_group_ids):
+    if (
+        board_id != str(contract.sales_board_id)
+        or is_excluded_sales_group(group_id, excluded_group_ids)
+    ):
         return SalesItemSnapshot(
             board_id=board_id,
             item_id=item_id,

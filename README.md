@@ -264,6 +264,11 @@ into an excluded group. Publication performs the same authoritative check
 immediately before any write. Excluded-group classification requires only the
 authoritative item, board, group, and state; omitted Email File or publication
 columns do not turn a Completed Folder move into a retryable processing error.
+An item moved off the managed Sales board is handled the same way without
+interpreting columns on the destination board. Reconciliation keeps the
+original Sales board processing identity, marks the item ineligible, and
+records the authoritative destination board in a `moved_from_managed_board`
+audit.
 
 Run a background worker from the repository root:
 

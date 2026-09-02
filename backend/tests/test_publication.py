@@ -301,6 +301,25 @@ def test_excluded_group_blocks_all_writes() -> None:
     assert client.mutations == []
 
 
+def test_moved_board_blocks_all_writes_without_sales_columns() -> None:
+    moved_item = _sales_item(group_id="group_mkpbd6vy")
+    moved_item["board"]["id"] = "1882196103"
+    moved_item["column_values"] = []
+    client = FakePublicationClient([moved_item])
+
+    with pytest.raises(StalePublicationError, match="moved from the managed board"):
+        publish_sales_item(
+            client=client,
+            publication_gate=_enabled_gate(),
+            item_id="42",
+            input_revision=INPUT_REVISION,
+            postcode_label_id=115,
+        )
+
+    assert client.reads == ["42"]
+    assert client.mutations == []
+
+
 def test_disabled_schema_gate_blocks_the_mutation() -> None:
     client = FakePublicationClient([_sales_item()])
 

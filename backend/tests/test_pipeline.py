@@ -620,6 +620,49 @@ def test_excluded_group_cancels_queued_job_before_processing(database) -> None:
         assert accounts_client.page_calls == 0
 
 
+def test_moved_board_cancels_queued_job_before_processing(database) -> None:
+    content = eml_bytes()
+    asset = identity(content)
+    job = add_claimed_job(database, asset)
+    moved_item = sales_item(asset, group_id="group_mkpbd6vy")
+    moved_item["board"]["id"] = "1882196103"
+    moved_item["column_values"] = []
+    monday = FakeMonday(moved_item, content)
+    accounts_client = FlakyAccountsClient()
+
+    outcome = run_pipeline_job(
+        database,
+        job.id,
+        worker_id="worker-a",
+        dependencies=dependencies(
+            monday,
+            FakePostcodeClient(),
+            accounts_client,
+        ),
+        mode="shadow",
+        now=NOW,
+    )
+
+    with database() as session:
+        cancelled = session.get(ProcessingJob, job.id)
+        audit = (
+            session.query(ProcessingAudit)
+            .filter_by(job_id=job.id, event_type="board_movement")
+            .one()
+        )
+        assert outcome == "superseded"
+        assert cancelled is not None
+        assert cancelled.status == ProcessingJobStatus.CANCELLED.value
+        assert cancelled.last_error == "BoardMoved"
+        assert cancelled.item.state == ProcessingItemState.INELIGIBLE.value
+        assert cancelled.item.board_id == str(BOARD_CONTRACT.sales_board_id)
+        assert audit.outcome == "moved_from_managed_board"
+        assert audit.details_json["authoritativeBoardId"] == "1882196103"
+        assert audit.details_json["groupId"] == "group_mkpbd6vy"
+        assert monday.download_count == 0
+        assert accounts_client.page_calls == 0
+
+
 @pytest.mark.parametrize(
     ("mode", "item_id", "analysis", "publication"),
     [

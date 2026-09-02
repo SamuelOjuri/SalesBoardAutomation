@@ -93,6 +93,19 @@ def test_excluded_group_snapshot_does_not_require_email_file_column() -> None:
     assert snapshot.email_assets == ()
 
 
+def test_moved_board_snapshot_does_not_require_email_file_column() -> None:
+    raw_item = item_snapshot()
+    raw_item["board"]["id"] = "1882196103"
+    raw_item["group"] = {"id": "group_mkpbd6vy", "title": "Landing Zone"}
+    raw_item["column_values"] = []
+
+    snapshot = parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
+
+    assert snapshot.board_id == "1882196103"
+    assert snapshot.group_id == "group_mkpbd6vy"
+    assert snapshot.email_assets == ()
+
+
 def test_eligible_group_snapshot_still_requires_email_file_column() -> None:
     raw_item = item_snapshot()
     raw_item["column_values"] = []
