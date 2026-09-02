@@ -16,6 +16,7 @@ from app.models import (
     ProcessingJobStatus,
 )
 from app.services.email_parser import AttachmentExtractionError
+from app.services.intake import IntakeContractError, IntakeSnapshotUnavailable
 from app.services.worker import (
     JobLeaseError,
     claim_next_job,
@@ -214,11 +215,114 @@ def test_worker_logs_only_error_type_not_sensitive_message(
     failure_record = next(
         record
         for record in caplog.records
-        if record.getMessage() == "processing job failed"
+        if record.getMessage().startswith("processing job failed ")
     )
     assert failure_record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert failure_record.stage == ProcessingJobStage.EXTRACTING.value  # type: ignore[attr-defined]
+    assert failure_record.attempt_count == 1  # type: ignore[attr-defined]
+    assert failure_record.outcome == ProcessingJobStatus.RETRY_WAIT.value  # type: ignore[attr-defined]
     assert sensitive_marker not in caplog.text
     assert sensitive_marker not in str(failure_record.__dict__)
+
+
+def test_retryable_intake_snapshot_failure_records_safe_reason(
+    session_factory,
+) -> None:
+    with session_factory() as session:
+        job = add_job(session, item_id="353")
+        job_id = job.id
+        session.commit()
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://user:password@localhost/sales",
+        monday_ingestion_access_token="token",
+        monday_webhook_shared_secret="shared-secret",
+        gemini_api_key="gemini-key",
+        gemini_model="gemini-test-model",
+        processing_pipeline_version=build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
+        processing_mode="shadow",
+        worker_heartbeat_interval_seconds=1,
+        worker_lease_timeout_seconds=10,
+    )
+    runtime = WorkerRuntime(
+        settings=settings,
+        engine=cast(Any, session_factory.kw["bind"]),
+        session_factory=session_factory,
+        monday_client=cast(Any, None),
+        dependencies=cast(Any, None),
+        worker_id="worker-intake-retry-test",
+    )
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise IntakeSnapshotUnavailable(
+            "PRIVATE-SNAPSHOT-CONTENT",
+            code="asset_metadata_missing",
+        )
+
+    assert process_next_job(runtime, pipeline_runner=fail_pipeline, now=NOW)
+
+    with session_factory() as session:
+        retried = session.get(ProcessingJob, job_id)
+        assert retried is not None
+        assert retried.status == ProcessingJobStatus.RETRY_WAIT.value
+        failure_audit = (
+            session.query(ProcessingAudit)
+            .filter_by(job_id=job_id, event_type="worker_failure")
+            .one()
+        )
+        assert failure_audit.details_json["errorCode"] == "asset_metadata_missing"
+        assert failure_audit.details_json["rootCauseType"] == (
+            "IntakeSnapshotUnavailable"
+        )
+
+
+def test_malformed_intake_failure_remains_terminal(session_factory) -> None:
+    with session_factory() as session:
+        job = add_job(session, item_id="354")
+        job_id = job.id
+        session.commit()
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://user:password@localhost/sales",
+        monday_ingestion_access_token="token",
+        monday_webhook_shared_secret="shared-secret",
+        gemini_api_key="gemini-key",
+        gemini_model="gemini-test-model",
+        processing_pipeline_version=build_processing_pipeline_version(
+            "gemini-test-model"
+        ),
+        processing_mode="shadow",
+        worker_heartbeat_interval_seconds=1,
+        worker_lease_timeout_seconds=10,
+    )
+    runtime = WorkerRuntime(
+        settings=settings,
+        engine=cast(Any, session_factory.kw["bind"]),
+        session_factory=session_factory,
+        monday_client=cast(Any, None),
+        dependencies=cast(Any, None),
+        worker_id="worker-intake-terminal-test",
+    )
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise IntakeContractError(
+            "PRIVATE-SNAPSHOT-CONTENT",
+            code="email_file_value_malformed",
+        )
+
+    assert process_next_job(runtime, pipeline_runner=fail_pipeline, now=NOW)
+
+    with session_factory() as session:
+        failed = session.get(ProcessingJob, job_id)
+        assert failed is not None
+        assert failed.status == ProcessingJobStatus.FAILED.value
+        assert failed.attempt_count == 1
 
 
 def test_supported_attachment_extraction_failure_is_retried(

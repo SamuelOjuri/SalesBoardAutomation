@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+import httpx
+import requests
 from google import genai
-from google.genai import types
+from google.genai import errors as genai_errors, types
 from pydantic import BaseModel, ConfigDict, Field
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 from app.config import BOARD_CONTRACT, Settings
 from app.services.email_parser import (
@@ -118,12 +122,23 @@ class GeminiPostcodeClient:
         api_key: str,
         model: str,
         generate_content: GenerateContent | None = None,
+        max_attempts: int = 3,
+        retry_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be empty")
         if not model.strip():
             raise ValueError("model must not be empty")
+        if not 1 <= max_attempts <= 10:
+            raise ValueError("max_attempts must be between 1 and 10")
         self._model = model.strip()
+        self._retrying = Retrying(
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_random_exponential(multiplier=0.5, max=4),
+            retry=retry_if_exception(_is_retryable_gemini_error),
+            sleep=retry_sleep,
+            reraise=True,
+        )
         if generate_content is None:
             client = genai.Client(api_key=api_key)
             self._generate_content: GenerateContent = (
@@ -177,7 +192,7 @@ class GeminiPostcodeClient:
             f"{context}\n"
             "</untrusted_content>"
         )
-        response = self._generate_content(
+        response = self._call_generate_content(
             self._model,
             prompt,
             types.GenerateContentConfig(
@@ -190,7 +205,7 @@ class GeminiPostcodeClient:
 
     def process_pdf(self, content: bytes, filename: str) -> str:
         del filename
-        response = self._generate_content(
+        response = self._call_generate_content(
             self._model,
             [
                 types.Part.from_bytes(data=content, mime_type="application/pdf"),
@@ -219,7 +234,7 @@ class GeminiPostcodeClient:
         }.get(suffix)
         if mime_type is None:
             raise ValueError("unsupported image format")
-        response = self._generate_content(
+        response = self._call_generate_content(
             self._model,
             [
                 types.Part.from_bytes(data=content, mime_type=mime_type),
@@ -231,6 +246,29 @@ class GeminiPostcodeClient:
             types.GenerateContentConfig(temperature=0),
         )
         return _response_text(response)
+
+    def _call_generate_content(
+        self,
+        model: str,
+        contents: Any,
+        config: types.GenerateContentConfig,
+    ) -> Any:
+        return self._retrying(self._generate_content, model, contents, config)
+
+
+def _is_retryable_gemini_error(error: BaseException) -> bool:
+    if isinstance(error, genai_errors.ServerError):
+        return True
+    if isinstance(error, genai_errors.ClientError):
+        return error.code == 429
+    return isinstance(
+        error,
+        (
+            httpx.TransportError,
+            requests.ConnectionError,
+            requests.Timeout,
+        ),
+    )
 
 
 def analyze_downloaded_email_assets(

@@ -35,6 +35,7 @@ from app.services.worker import (
     heartbeat_job,
     recover_stale_jobs,
     retry_or_fail_job,
+    safe_error_details,
     utc_now,
 )
 
@@ -227,35 +228,64 @@ def process_next_job(
             },
         )
     except Exception as error:
-        logger.error(
-            "processing job failed",
-            extra={
-                "job_id": str(job.id),
-                "item_id": job.item_id,
-                "error_type": type(error).__name__,
-            },
-        )
+        failure_stage = job.stage
+        failure_status = "unrecorded"
+        attempt_count = job.attempt_count
         try:
             with runtime.session_factory() as session:
-                retry_or_fail_job(
+                failed_job = retry_or_fail_job(
                     session,
                     job.id,
                     worker_id=runtime.worker_id,
                     error=error,
-                    retryable=not isinstance(
-                        error,
-                        (PipelineExecutionDisabled, ValueError),
-                    ),
+                    retryable=_error_is_retryable(error),
                     retry_base_seconds=settings.worker_retry_base_seconds,
                     retry_max_seconds=settings.worker_retry_max_seconds,
                 )
+                failure_stage = failed_job.stage
+                failure_status = failed_job.status
+                attempt_count = failed_job.attempt_count
                 session.commit()
         except JobLeaseError:
             logger.warning(
                 "processing job failure could not update a lost lease",
                 extra={"job_id": str(job.id)},
             )
+            failure_status = "lease_lost"
+        safe_details = safe_error_details(error)
+        logger.error(
+            "processing job failed job_id=%s item_id=%s stage=%s "
+            "attempt_count=%s error_type=%s error_code=%s "
+            "root_cause_type=%s outcome=%s",
+            job.id,
+            job.item_id,
+            failure_stage,
+            attempt_count,
+            type(error).__name__,
+            safe_details.get("errorCode", "none"),
+            safe_details["rootCauseType"],
+            failure_status,
+            extra={
+                "job_id": str(job.id),
+                "item_id": job.item_id,
+                "stage": failure_stage,
+                "attempt_count": attempt_count,
+                "error_type": type(error).__name__,
+                "error_code": safe_details.get("errorCode"),
+                "root_cause_type": safe_details["rootCauseType"],
+                "outcome": failure_status,
+            },
+        )
     return True
+
+
+def _error_is_retryable(error: BaseException) -> bool:
+    if isinstance(error, PipelineExecutionDisabled):
+        return False
+    explicit = getattr(error, "retryable", None)
+    if isinstance(explicit, bool):
+        return explicit
+    return not isinstance(error, ValueError)
 
 
 def run_worker(

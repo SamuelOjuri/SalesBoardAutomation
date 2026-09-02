@@ -230,16 +230,24 @@ only schema creation path; application startup never creates tables.
 with PostgreSQL row locks and `SKIP LOCKED`, records lease ownership, sends
 heartbeats from short independent transactions, and recovers expired leases.
 Failures retain the last completed stage and use capped exponential retry.
-Only exception types, job IDs, item IDs, and structured outcomes are logged;
-email and model content are not persisted in logs or error fields.
+Failure logs include the persisted stage, attempt count, outcome, exception
+type, safe reason code, and root-cause type. The same non-sensitive metadata is
+stored on `worker_failure` audits; exception messages, email content, and model
+output are never persisted in logs or error fields. Temporarily incomplete
+Monday snapshots are retried, while malformed IDs, membership JSON, column
+types, and insecure URLs remain terminal contract failures.
 
 `backend/app/services/pipeline.py` commits checkpoints after `extracting`,
 `matching_account`, `validating`, and `publishing`. A retry resumes from the
 saved stage. Every checkpoint verifies lease ownership and the immutable input
 identity. If Monday or a newer webhook exposes changed Email input, the worker
 cancels the leased job and creates an immutable successor for the authoritative
-snapshot. A retry after an ambiguous publication remains safe because Phase 6
-post-reads Monday and complete-value writes are idempotent.
+snapshot. Revalidation after extraction requires the immutable asset identity,
+but not an expiring download URL. Initial extraction remains download-ready and
+requires a valid HTTPS URL. Each Gemini request independently retries transient
+transport errors, HTTP 429 responses, and server errors up to three times with
+bounded jitter. A retry after an ambiguous publication remains safe because
+Phase 6 post-reads Monday and complete-value writes are idempotent.
 
 Processing modes are enforced by the worker:
 

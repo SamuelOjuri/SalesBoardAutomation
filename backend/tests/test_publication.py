@@ -361,3 +361,12 @@ def test_typed_publication_values_are_required() -> None:
 
     with pytest.raises(PublicationContractError, match="missing values"):
         parse_sales_publication_snapshot(raw_item)
+
+
+def test_publication_identity_revalidation_does_not_require_download_url() -> None:
+    raw_item = _sales_item()
+    raw_item["assets"][0]["public_url"] = None
+
+    snapshot = parse_sales_publication_snapshot(raw_item)
+
+    assert snapshot.input_revision == INPUT_REVISION

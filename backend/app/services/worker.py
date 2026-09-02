@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -172,6 +173,7 @@ def retry_or_fail_job(
     job = lock_owned_job(session, job_id, worker_id=worker_id)
     item = _locked_item(session, job)
     job.last_error = type(error).__name__
+    safe_details = safe_error_details(error)
     should_retry = retryable and job.attempt_count < job.max_attempts
     if should_retry:
         delay = retry_delay_seconds(
@@ -187,6 +189,7 @@ def retry_or_fail_job(
             "attemptCount": job.attempt_count,
             "errorType": type(error).__name__,
             "retryDelaySeconds": delay,
+            **safe_details,
         }
     else:
         job.status = ProcessingJobStatus.FAILED.value
@@ -197,6 +200,7 @@ def retry_or_fail_job(
         details = {
             "attemptCount": job.attempt_count,
             "errorType": type(error).__name__,
+            **safe_details,
         }
     _release_lease(job)
     _add_audit(
@@ -209,6 +213,36 @@ def retry_or_fail_job(
     )
     session.flush()
     return job
+
+
+def safe_error_details(error: BaseException) -> dict[str, str]:
+    chain = _error_chain(error)
+    details = {"rootCauseType": type(chain[-1]).__name__}
+    for candidate in chain:
+        raw_code = getattr(candidate, "code", None)
+        if isinstance(raw_code, int) and 100 <= raw_code <= 599:
+            details["errorCode"] = f"http_{raw_code}"
+            break
+        if (
+            isinstance(raw_code, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", raw_code)
+            is not None
+        ):
+            details["errorCode"] = raw_code
+            break
+    return details
+
+
+def _error_chain(error: BaseException) -> tuple[BaseException, ...]:
+    chain = [error]
+    seen = {id(error)}
+    while len(chain) < 8:
+        cause = chain[-1].__cause__
+        if cause is None or id(cause) in seen:
+            break
+        chain.append(cause)
+        seen.add(id(cause))
+    return tuple(chain)
 
 
 def recover_stale_jobs(

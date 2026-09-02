@@ -341,6 +341,52 @@ def test_shadow_pipeline_completes_without_monday_mutation(database) -> None:
         assert monday.mutations == []
 
 
+def test_revalidation_does_not_require_download_url_after_extraction(
+    database,
+) -> None:
+    class ExpiringDownloadUrlMonday(FakeMonday):
+        def __init__(self, item: Mapping[str, Any], content: bytes) -> None:
+            super().__init__(item, content)
+            self.intake_reads = 0
+
+        def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]:
+            item = super().load_sales_item_intake(item_id)
+            self.intake_reads += 1
+            if self.intake_reads == 1:
+                return item
+            revalidation_item = dict(item)
+            revalidation_item["assets"] = [
+                {**asset, "public_url": None} for asset in item["assets"]
+            ]
+            return revalidation_item
+
+    content = eml_bytes()
+    asset = identity(content)
+    job = add_claimed_job(database, asset)
+    monday = ExpiringDownloadUrlMonday(sales_item(asset), content)
+
+    outcome = run_pipeline_job(
+        database,
+        job.id,
+        worker_id="worker-a",
+        dependencies=dependencies(
+            monday,
+            FakePostcodeClient(),
+            FlakyAccountsClient(),
+        ),
+        mode="shadow",
+        now=NOW,
+    )
+
+    with database() as session:
+        completed = session.get(ProcessingJob, job.id)
+        assert completed is not None
+        assert completed.status == ProcessingJobStatus.COMPLETED.value
+    assert outcome == "shadow_completed"
+    assert monday.intake_reads == 3
+    assert monday.download_count == 1
+
+
 def test_account_alias_uses_corroborating_wrapped_signature_website(
     database,
 ) -> None:

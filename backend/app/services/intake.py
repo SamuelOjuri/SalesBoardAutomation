@@ -39,11 +39,29 @@ SUPPORTED_EMAIL_EXTENSIONS = frozenset({".eml", ".msg"})
 class IntakeContractError(ValueError):
     """Raised when Monday returns an unsafe or incomplete intake snapshot."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "intake_contract_violation",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+class IntakeSnapshotUnavailable(IntakeContractError):
+    """Raised when an authoritative Monday response is temporarily incomplete."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message, code=code, retryable=True)
+
 
 @dataclass(frozen=True, slots=True)
 class EmailAsset:
     identity: EmailAssetIdentity
-    download_url: str
+    download_url: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +106,7 @@ def parse_sales_item_snapshot(
     raw_item: Mapping[str, Any],
     *,
     contract: BoardContract,
+    require_download_urls: bool = True,
 ) -> SalesItemSnapshot:
     item_id = _positive_decimal_id(raw_item.get("id"), "item ID")
     board = _mapping(raw_item.get("board"), "item board")
@@ -96,22 +115,39 @@ def parse_sales_item_snapshot(
     group_id = _nonempty_id(group.get("id"), "group ID")
     state = raw_item.get("state")
     if not isinstance(state, str):
-        raise IntakeContractError("Monday item state is missing")
+        raise IntakeSnapshotUnavailable(
+            "Monday item state is missing",
+            code="item_state_missing",
+        )
 
     columns = raw_item.get("column_values")
     if not isinstance(columns, list):
-        raise IntakeContractError("Monday item columns are missing")
+        raise IntakeSnapshotUnavailable(
+            "Monday item columns are missing",
+            code="item_columns_missing",
+        )
     matching_columns = [
         value
         for value in columns
         if isinstance(value, Mapping)
         and str(value.get("id")) == contract.email_file_column_id
     ]
+    if not matching_columns:
+        raise IntakeSnapshotUnavailable(
+            "Monday Email File column is missing",
+            code="email_file_column_missing",
+        )
     if len(matching_columns) != 1:
-        raise IntakeContractError("Monday Email File column is missing or duplicated")
+        raise IntakeContractError(
+            "Monday Email File column is duplicated",
+            code="email_file_column_duplicated",
+        )
     email_column = matching_columns[0]
     if email_column.get("type") != "file":
-        raise IntakeContractError("Monday Email File column has the wrong type")
+        raise IntakeContractError(
+            "Monday Email File column has the wrong type",
+            code="email_file_column_wrong_type",
+        )
 
     metadata_by_id = _asset_metadata_by_id(raw_item.get("assets"))
     email_assets: list[EmailAsset] = []
@@ -119,22 +155,31 @@ def parse_sales_item_snapshot(
     for member in _file_members(email_column.get("value")):
         asset_id = _positive_decimal_id(member.get("assetId"), "asset ID")
         if asset_id in seen_asset_ids:
-            raise IntakeContractError(f"Email File contains duplicate asset {asset_id}")
+            raise IntakeContractError(
+                f"Email File contains duplicate asset {asset_id}",
+                code="email_file_duplicate_asset",
+            )
         seen_asset_ids.add(asset_id)
         metadata = metadata_by_id.get(asset_id)
         if metadata is None:
-            raise IntakeContractError(
-                f"Email File asset {asset_id} is missing metadata"
+            raise IntakeSnapshotUnavailable(
+                f"Email File asset {asset_id} is missing metadata",
+                code="asset_metadata_missing",
             )
         filename = metadata.get("name")
         if not isinstance(filename, str) or not filename.strip():
-            raise IntakeContractError(f"Email File asset {asset_id} has no filename")
+            raise IntakeSnapshotUnavailable(
+                f"Email File asset {asset_id} has no filename",
+                code="asset_filename_missing",
+            )
         if PurePath(filename).suffix.casefold() not in SUPPORTED_EMAIL_EXTENSIONS:
             continue
 
         size_bytes = _nonnegative_int(metadata.get("file_size"), "asset size")
         created_at = _timestamp(metadata.get("created_at"))
-        download_url = _download_url(metadata)
+        download_url = (
+            _download_url(metadata) if require_download_urls else None
+        )
         email_assets.append(
             EmailAsset(
                 identity=EmailAssetIdentity(
@@ -281,6 +326,11 @@ def download_email_assets(
         root = Path(temporary_directory)
         downloaded: list[DownloadedEmailAsset] = []
         for asset in sorted(assets, key=lambda value: int(value.identity.asset_id)):
+            if asset.download_url is None:
+                raise IntakeContractError(
+                    "Email asset download URL was not loaded",
+                    code="download_url_not_loaded",
+                )
             suffix = PurePath(asset.identity.filename).suffix.casefold()
             destination = root / f"{asset.identity.asset_id}{suffix}"
             sha256 = downloader.download_asset(
@@ -363,13 +413,19 @@ def _add_intake_audit(
 
 def _asset_metadata_by_id(raw_assets: object) -> dict[str, Mapping[str, Any]]:
     if not isinstance(raw_assets, list):
-        raise IntakeContractError("Monday item assets are missing")
+        raise IntakeSnapshotUnavailable(
+            "Monday item assets are missing",
+            code="item_assets_missing",
+        )
     result: dict[str, Mapping[str, Any]] = {}
     for raw_asset in raw_assets:
         metadata = _mapping(raw_asset, "asset metadata")
         asset_id = _positive_decimal_id(metadata.get("id"), "asset ID")
         if asset_id in result:
-            raise IntakeContractError(f"Monday returned duplicate asset {asset_id}")
+            raise IntakeContractError(
+                f"Monday returned duplicate asset {asset_id}",
+                code="duplicate_asset_metadata",
+            )
         result[asset_id] = metadata
     return result
 
@@ -378,72 +434,123 @@ def _file_members(raw_value: object) -> list[Mapping[str, Any]]:
     if raw_value is None or raw_value == "":
         return []
     if not isinstance(raw_value, str):
-        raise IntakeContractError("Monday Email File value is malformed")
+        raise IntakeContractError(
+            "Monday Email File value is malformed",
+            code="email_file_value_malformed",
+        )
     try:
         parsed = json.loads(raw_value)
     except json.JSONDecodeError as error:
-        raise IntakeContractError("Monday Email File value is malformed") from error
+        raise IntakeContractError(
+            "Monday Email File value is malformed",
+            code="email_file_value_malformed",
+        ) from error
     if not isinstance(parsed, Mapping) or not isinstance(parsed.get("files"), list):
-        raise IntakeContractError("Monday Email File membership is malformed")
+        raise IntakeContractError(
+            "Monday Email File membership is malformed",
+            code="email_file_membership_malformed",
+        )
     members = parsed["files"]
     if not all(isinstance(member, Mapping) for member in members):
-        raise IntakeContractError("Monday Email File membership is malformed")
+        raise IntakeContractError(
+            "Monday Email File membership is malformed",
+            code="email_file_membership_malformed",
+        )
     return members
 
 
 def _positive_decimal_id(value: object, field_name: str) -> str:
     if value is None or isinstance(value, bool):
-        raise IntakeContractError(f"Monday {field_name} is missing")
+        raise IntakeSnapshotUnavailable(
+            f"Monday {field_name} is missing",
+            code=f"{field_name.replace(' ', '_').lower()}_missing",
+        )
     normalized = str(value).strip()
     if not normalized.isdecimal() or int(normalized) <= 0:
-        raise IntakeContractError(f"Monday {field_name} is malformed")
+        raise IntakeContractError(
+            f"Monday {field_name} is malformed",
+            code=f"{field_name.replace(' ', '_').lower()}_malformed",
+        )
     return str(int(normalized))
 
 
 def _nonempty_id(value: object, field_name: str) -> str:
     if value is None or isinstance(value, bool):
-        raise IntakeContractError(f"Monday {field_name} is missing")
+        raise IntakeSnapshotUnavailable(
+            f"Monday {field_name} is missing",
+            code=f"{field_name.replace(' ', '_').lower()}_missing",
+        )
     normalized = str(value).strip()
     if not normalized:
-        raise IntakeContractError(f"Monday {field_name} is malformed")
+        raise IntakeContractError(
+            f"Monday {field_name} is malformed",
+            code=f"{field_name.replace(' ', '_').lower()}_malformed",
+        )
     return normalized
 
 
 def _mapping(value: object, field_name: str) -> Mapping[str, Any]:
+    if value is None:
+        raise IntakeSnapshotUnavailable(
+            f"Monday {field_name} is missing",
+            code=f"{field_name.replace(' ', '_').lower()}_missing",
+        )
     if not isinstance(value, Mapping):
-        raise IntakeContractError(f"Monday {field_name} is malformed")
+        raise IntakeContractError(
+            f"Monday {field_name} is malformed",
+            code=f"{field_name.replace(' ', '_').lower()}_malformed",
+        )
     return value
 
 
 def _nonnegative_int(value: object, field_name: str) -> int:
     if value is None or isinstance(value, bool):
-        raise IntakeContractError(f"Monday {field_name} is missing")
+        raise IntakeSnapshotUnavailable(
+            f"Monday {field_name} is missing",
+            code=f"{field_name.replace(' ', '_').lower()}_missing",
+        )
     normalized = str(value).strip()
     if not normalized.isdecimal():
-        raise IntakeContractError(f"Monday {field_name} is malformed")
+        raise IntakeContractError(
+            f"Monday {field_name} is malformed",
+            code=f"{field_name.replace(' ', '_').lower()}_malformed",
+        )
     return int(normalized)
 
 
 def _timestamp(value: object) -> datetime:
     if not isinstance(value, str) or not value.strip():
-        raise IntakeContractError("Monday asset creation timestamp is missing")
+        raise IntakeSnapshotUnavailable(
+            "Monday asset creation timestamp is missing",
+            code="asset_created_at_missing",
+        )
     try:
         timestamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError as error:
         raise IntakeContractError(
-            "Monday asset creation timestamp is malformed"
+            "Monday asset creation timestamp is malformed",
+            code="asset_created_at_malformed",
         ) from error
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        raise IntakeContractError("Monday asset creation timestamp has no timezone")
+        raise IntakeContractError(
+            "Monday asset creation timestamp has no timezone",
+            code="asset_created_at_timezone_missing",
+        )
     return timestamp
 
 
 def _download_url(metadata: Mapping[str, Any]) -> str:
     value = metadata.get("public_url")
     if not isinstance(value, str) or not value.strip():
-        raise IntakeContractError("Monday asset public download URL is missing")
+        raise IntakeSnapshotUnavailable(
+            "Monday asset public download URL is missing",
+            code="asset_public_url_missing",
+        )
     value = value.strip()
     parsed = urlparse(value)
     if parsed.scheme.casefold() != "https" or not parsed.hostname:
-        raise IntakeContractError("Monday asset public download URL must use HTTPS")
+        raise IntakeContractError(
+            "Monday asset public download URL must use HTTPS",
+            code="asset_public_url_insecure",
+        )
     return value

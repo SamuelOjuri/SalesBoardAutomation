@@ -213,7 +213,11 @@ def parse_sales_publication_snapshot(
     raw_item: Mapping[str, Any],
 ) -> SalesPublicationSnapshot:
     try:
-        intake = parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
+        intake = parse_sales_item_snapshot(
+            raw_item,
+            contract=BOARD_CONTRACT,
+            require_download_urls=False,
+        )
         input_revision = compute_input_revision(
             asset.identity for asset in intake.email_assets
         )

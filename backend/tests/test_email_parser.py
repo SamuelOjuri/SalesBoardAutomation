@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from google.genai.errors import ClientError, ServerError
 from pydantic import ValidationError
 
 from app.input_revision import EmailAssetIdentity
@@ -441,3 +442,55 @@ def test_malformed_gemini_output_fails_strict_validation() -> None:
 
     with pytest.raises(ValidationError, match="extra_forbidden"):
         client.extract_design_parameters("untrusted content")
+
+
+def test_gemini_transient_server_error_is_retried_in_place() -> None:
+    class Response:
+        parsed = DesignParameterExtraction(post_code="WA4 6NL")
+
+    attempts = 0
+    retry_delays: list[float] = []
+
+    def generate_content(model: str, contents: Any, config: Any) -> Response:
+        nonlocal attempts
+        del model, contents, config
+        attempts += 1
+        if attempts < 3:
+            raise ServerError(503, {"error": {"message": "unavailable"}})
+        return Response()
+
+    client = GeminiPostcodeClient(
+        api_key="test-key",
+        model="test-model",
+        generate_content=generate_content,
+        retry_sleep=retry_delays.append,
+    )
+
+    result = client.extract_design_parameters("untrusted content")
+
+    assert result.post_code == "WA4 6NL"
+    assert attempts == 3
+    assert len(retry_delays) == 2
+
+
+def test_gemini_non_retryable_client_error_is_not_retried() -> None:
+    attempts = 0
+
+    def generate_content(model: str, contents: Any, config: Any) -> None:
+        nonlocal attempts
+        del model, contents, config
+        attempts += 1
+        raise ClientError(400, {"error": {"message": "invalid request"}})
+
+    client = GeminiPostcodeClient(
+        api_key="test-key",
+        model="test-model",
+        generate_content=generate_content,
+        retry_sleep=lambda _delay: None,
+    )
+
+    with pytest.raises(ClientError) as captured:
+        client.extract_design_parameters("untrusted content")
+
+    assert captured.value.code == 400
+    assert attempts == 1

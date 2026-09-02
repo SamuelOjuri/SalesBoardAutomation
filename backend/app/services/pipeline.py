@@ -280,7 +280,11 @@ def _run_matching_stage(
     now: datetime,
 ) -> bool:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(dependencies.monday, job.item_id)
+    snapshot = _load_snapshot(
+        dependencies.monday,
+        job.item_id,
+        require_download_urls=False,
+    )
     if not _snapshot_matches_job(
         snapshot,
         job,
@@ -343,7 +347,11 @@ def _run_validation_stage(
     now: datetime,
 ) -> Literal["publishing", "shadow_completed", "superseded"]:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(dependencies.monday, job.item_id)
+    snapshot = _load_snapshot(
+        dependencies.monday,
+        job.item_id,
+        require_download_urls=False,
+    )
     if not _snapshot_matches_job(
         snapshot,
         job,
@@ -529,10 +537,13 @@ def _replace_with_snapshot(
 def _load_snapshot(
     monday: PipelineMondayClient,
     item_id: str,
+    *,
+    require_download_urls: bool = True,
 ) -> SalesItemSnapshot:
     return parse_sales_item_snapshot(
         monday.load_sales_item_intake(item_id),
         contract=BOARD_CONTRACT,
+        require_download_urls=require_download_urls,
     )
 
 

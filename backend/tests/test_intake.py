@@ -104,6 +104,42 @@ def test_supported_asset_requires_complete_safe_metadata(
         parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
 
 
+def test_identity_only_snapshot_does_not_require_download_url() -> None:
+    raw_item = item_snapshot()
+    raw_item["assets"][1]["public_url"] = None
+
+    snapshot = parse_sales_item_snapshot(
+        raw_item,
+        contract=BOARD_CONTRACT,
+        require_download_urls=False,
+    )
+
+    assert snapshot.email_assets[0].identity.asset_id == "2"
+    assert snapshot.email_assets[0].download_url is None
+
+
+def test_missing_asset_metadata_has_safe_retryable_reason_code() -> None:
+    raw_item = item_snapshot()
+    raw_item["assets"] = []
+
+    with pytest.raises(IntakeContractError) as captured:
+        parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
+
+    assert captured.value.code == "asset_metadata_missing"
+    assert captured.value.retryable is True
+
+
+def test_malformed_membership_has_safe_terminal_reason_code() -> None:
+    raw_item = item_snapshot()
+    raw_item["column_values"][0]["value"] = "not-json"
+
+    with pytest.raises(IntakeContractError) as captured:
+        parse_sales_item_snapshot(raw_item, contract=BOARD_CONTRACT)
+
+    assert captured.value.code == "email_file_value_malformed"
+    assert captured.value.retryable is False
+
+
 def test_queue_coalesces_without_mutating_active_job_identity() -> None:
     engine = create_database_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
