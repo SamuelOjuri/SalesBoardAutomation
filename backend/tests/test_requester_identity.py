@@ -1,6 +1,8 @@
 from app.services.email_parser import ParsedEmail
 from app.services.requester_identity import (
+    email_address_sha256,
     extract_requester_identity,
+    normalize_email_address,
     normalize_domain,
 )
 
@@ -41,6 +43,9 @@ def test_external_top_level_sender_is_preferred_and_normalized() -> None:
     assert identity.company == "Example Construction Ltd"
     assert identity.source == "top_level_sender"
     assert identity.website_domains == ()
+    assert identity.email_address_sha256 == email_address_sha256(
+        "person@sales.www.example.co.uk"
+    )
 
 
 def test_internal_forward_uses_newest_external_forwarded_header() -> None:
@@ -196,3 +201,13 @@ def test_domain_normalization_requires_a_public_suffix() -> None:
     assert normalize_domain(" WWW.Example.CO.UK. ") == "example.co.uk"
     assert normalize_domain("localhost") is None
     assert normalize_domain("not a domain") is None
+
+
+def test_email_normalization_is_exact_and_rejects_multiple_mailboxes() -> None:
+    assert normalize_email_address(
+        "Person <PERSON@Sales.WWW.Example.CO.UK>"
+    ) == "person@sales.www.example.co.uk"
+    assert normalize_email_address("one@example.com, two@example.com") is None
+    assert email_address_sha256("PERSON@EXAMPLE.COM") == email_address_sha256(
+        "person@example.com"
+    )

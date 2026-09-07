@@ -170,6 +170,17 @@ eligible. Complete indexes are cached for five minutes. A selected Account is
 always re-fetched, must belong to the configured Accounts board, and must still
 be active and unflagged before publication.
 
+When a direct requester domain belongs to multiple eligible Accounts and exact
+company-name evidence does not resolve the ambiguity, the resolver loads the
+complete Contacts board through typed Email and Accounts-relation values. It
+matches only the exact normalized email address selected by the trusted
+requester-identity rules. The address is retained across durable checkpoints
+only as a SHA-256 digest. A Contact match resolves an Account only when exactly
+one active Contact has that email, the Contact links to exactly one eligible
+Account, that Account is one of the direct-domain candidates, and company-name
+evidence does not conflict. Duplicate Contacts, multi-Account links, contacts
+outside the candidate set, and malformed Contact data fail closed.
+
 Direct domain matching remains the primary automatic Account rule.
 When more than one eligible Account has the requester's direct domain, a unique
 exact normalized company-name match within those domain candidates resolves the

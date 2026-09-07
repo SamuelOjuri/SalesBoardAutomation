@@ -10,11 +10,15 @@ from app.services.accounts import (
     AccountsContractError,
     AccountsIndex,
     AccountsIndexService,
+    ContactRecord,
+    ContactsIndex,
+    ContactsIndexService,
     match_account,
     normalize_account_name,
     parse_account_item,
+    parse_contact_item,
 )
-from app.services.requester_identity import RequesterIdentity
+from app.services.requester_identity import RequesterIdentity, email_address_sha256
 
 
 def _account(
@@ -71,6 +75,58 @@ class FakeAccountsClient:
     def load_account_item(self, item_id: str) -> Mapping[str, Any] | None:
         self.item_calls.append(item_id)
         return self.selected_item
+
+
+def _contact_item(
+    item_id: str,
+    *,
+    email: str | None = "requester@example.co.uk",
+    account_ids: tuple[str, ...] = ("10",),
+    state: str = "active",
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "name": f"Contact {item_id}",
+        "state": state,
+        "board": {"id": str(BOARD_CONTRACT.contacts_board_id)},
+        "column_values": [
+            {
+                "id": BOARD_CONTRACT.contact_email_column_id,
+                "type": "email",
+                "email": email,
+                "text": email,
+                "value": (
+                    None
+                    if email is None
+                    else f'{{"email":"{email}","text":"{email}"}}'
+                ),
+            },
+            {
+                "id": BOARD_CONTRACT.contact_accounts_relation_column_id,
+                "type": "board_relation",
+                "value": None,
+                "linked_item_ids": list(account_ids),
+            },
+        ],
+    }
+
+
+class FakeContactsClient:
+    def __init__(self, pages: dict[str | None, Mapping[str, Any]]) -> None:
+        self.pages = pages
+        self.page_calls: list[str | None] = []
+
+    def load_contacts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        assert board_id == BOARD_CONTRACT.contacts_board_id
+        assert limit == 500
+        self.page_calls.append(cursor)
+        return self.pages[cursor]
 
 
 def test_index_paginates_to_null_filters_only_duplicate_label_one_and_caches() -> None:
@@ -187,6 +243,59 @@ def test_malformed_duplicate_value_rejects_the_index() -> None:
         service.load_index()
 
 
+def test_contacts_index_paginates_hashes_email_addresses_and_caches() -> None:
+    client = FakeContactsClient(
+        {
+            None: {
+                "cursor": "next-page",
+                "items": [
+                    _contact_item(
+                        "100",
+                        email="PERSON@Sales.Example.CO.UK",
+                        account_ids=("10",),
+                    )
+                ],
+            },
+            "next-page": {
+                "cursor": None,
+                "items": [
+                    _contact_item(
+                        "200",
+                        email="person@example.co.uk",
+                        account_ids=("20",),
+                        state="archived",
+                    )
+                ],
+            },
+        }
+    )
+    service = ContactsIndexService(
+        client=client,
+        board_id=BOARD_CONTRACT.contacts_board_id,
+    )
+
+    first = service.load_index()
+    second = service.load_index()
+
+    assert first is second
+    assert client.page_calls == [None, "next-page"]
+    assert first.contacts[0].email_address_sha256 == email_address_sha256(
+        "person@sales.example.co.uk"
+    )
+    assert first.contacts[0].account_item_ids == ("10",)
+    assert first.matching_email_sha256(
+        email_address_sha256("person@example.co.uk") or ""
+    ) == ()
+
+
+def test_contact_parser_rejects_malformed_account_links() -> None:
+    raw_item = _contact_item("100")
+    raw_item["column_values"][1]["linked_item_ids"] = [True]
+
+    with pytest.raises(AccountsContractError, match="link ID is malformed"):
+        parse_contact_item(raw_item)
+
+
 def _record(
     item_id: str,
     name: str,
@@ -204,14 +313,31 @@ def _record(
     )
 
 
+def _contact(
+    item_id: str,
+    *,
+    email_address: str = "requester@example.com",
+    account_item_ids: tuple[str, ...] = ("10",),
+    active: bool = True,
+) -> ContactRecord:
+    return ContactRecord(
+        item_id=item_id,
+        name=f"Contact {item_id}",
+        active=active,
+        email_address_sha256=email_address_sha256(email_address),
+        account_item_ids=account_item_ids,
+    )
+
+
 def _requester(
     *,
     domain: str | None,
     company: str | None,
     website_domains: tuple[str, ...] = (),
+    email_address: str = "requester@example.com",
 ) -> RequesterIdentity:
     return RequesterIdentity(
-        email_address="requester@example.com",
+        email_address=email_address,
         domain=domain,
         company=company,
         source="top_level_sender",
@@ -345,6 +471,119 @@ def test_shared_domain_remains_unresolved_when_name_is_not_unique_within_domain(
     assert result.account is None
     assert result.domain_candidate_ids == ("10", "20")
     assert result.name_candidate_ids == ("10", "20")
+
+
+def test_shared_domain_is_disambiguated_by_unique_contact_email() -> None:
+    index = AccountsIndex(
+        (
+            _record(
+                "1661824839",
+                "Encon Insulation Limited",
+                domain="encon.co.uk",
+            ),
+            _record("1661825541", "ECON Leeds", domain="encon.co.uk"),
+            _record("1661825559", "ECON Plymouth", domain="encon.co.uk"),
+        )
+    )
+    contacts = ContactsIndex(
+        (
+            _contact(
+                "1662713491",
+                email_address="s.morrissey@encon.co.uk",
+                account_item_ids=("1661824839",),
+            ),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(
+            domain="encon.co.uk",
+            company="Encon Group",
+            email_address="S.Morrissey@ENCON.CO.UK",
+        ),
+        contacts=contacts,
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("1661824839")
+    assert result.contact == contacts.contacts[0]
+    assert result.reason == "unique_contact_email"
+    assert result.domain_candidate_ids == (
+        "1661824839",
+        "1661825541",
+        "1661825559",
+    )
+    assert result.name_candidate_ids == ()
+    assert result.contact_candidate_ids == ("1662713491",)
+
+
+def test_duplicate_contact_email_remains_unresolved() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme North", domain="acme.co.uk"),
+            _record("20", "Acme South", domain="acme.co.uk"),
+        )
+    )
+    contacts = ContactsIndex(
+        (
+            _contact("100", account_item_ids=("10",)),
+            _contact("200", account_item_ids=("10",)),
+        )
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company=None),
+        contacts=contacts,
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.contact is None
+    assert result.contact_candidate_ids == ("100", "200")
+
+
+def test_contact_linked_to_multiple_eligible_accounts_remains_unresolved() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme North", domain="acme.co.uk"),
+            _record("20", "Acme South", domain="acme.co.uk"),
+        )
+    )
+    contacts = ContactsIndex(
+        (_contact("100", account_item_ids=("10", "20")),)
+    )
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company=None),
+        contacts=contacts,
+    )
+
+    assert result.resolution is AccountResolution.UNRESOLVED
+    assert result.account is None
+    assert result.contact_candidate_ids == ("100",)
+
+
+def test_contact_email_cannot_override_conflicting_company_evidence() -> None:
+    index = AccountsIndex(
+        (
+            _record("10", "Acme North", domain="acme.co.uk"),
+            _record("20", "Acme South", domain="acme.co.uk"),
+        )
+    )
+    contacts = ContactsIndex((_contact("100", account_item_ids=("10",)),))
+
+    result = match_account(
+        index,
+        _requester(domain="acme.co.uk", company="Acme South"),
+        contacts=contacts,
+    )
+
+    assert result.resolution is AccountResolution.MATCHED
+    assert result.account == index.get("20")
+    assert result.reason == "unique_domain_and_name"
 
 
 def test_unique_domain_match_does_not_require_company_evidence() -> None:

@@ -20,7 +20,7 @@ from app.models import (
     ProcessingJobStatus,
 )
 from app.publication_gate import PublicationGate
-from app.services.accounts import AccountsIndexService
+from app.services.accounts import AccountsIndexService, ContactsIndexService
 from app.services.pipeline import (
     PipelineDependencies,
     analysis_allowed,
@@ -236,6 +236,105 @@ class FlakyAccountsClient:
         del item_id
         return None
 
+    def load_contacts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        del cursor, limit
+        assert board_id == BOARD_CONTRACT.contacts_board_id
+        return {"cursor": None, "items": []}
+
+
+class ContactAwareAccountsClient:
+    def __init__(self) -> None:
+        self.account_page_calls = 0
+        self.contact_page_calls = 0
+
+    def load_accounts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        del cursor, limit
+        assert board_id == BOARD_CONTRACT.accounts_board_id
+        self.account_page_calls += 1
+        accounts = (
+            ("1661824839", "Encon Insulation Limited"),
+            ("1661825541", "ECON Leeds"),
+            ("1661825559", "ECON Plymouth"),
+        )
+        return {
+            "cursor": None,
+            "items": [
+                {
+                    "id": item_id,
+                    "name": name,
+                    "state": "active",
+                    "board": {"id": str(BOARD_CONTRACT.accounts_board_id)},
+                    "column_values": [
+                        {
+                            "id": BOARD_CONTRACT.account_email_domain_column_id,
+                            "type": "text",
+                            "text": "encon.co.uk",
+                        },
+                        {
+                            "id": BOARD_CONTRACT.account_duplicate_column_id,
+                            "type": "dropdown",
+                            "values": [],
+                        },
+                    ],
+                }
+                for item_id, name in accounts
+            ],
+        }
+
+    def load_account_item(self, item_id: str) -> Mapping[str, Any] | None:
+        del item_id
+        return None
+
+    def load_contacts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        del cursor, limit
+        assert board_id == BOARD_CONTRACT.contacts_board_id
+        self.contact_page_calls += 1
+        email = "s.morrissey@encon.co.uk"
+        return {
+            "cursor": None,
+            "items": [
+                {
+                    "id": "1662713491",
+                    "name": "Sarah Morrissey",
+                    "state": "active",
+                    "board": {"id": str(BOARD_CONTRACT.contacts_board_id)},
+                    "column_values": [
+                        {
+                            "id": BOARD_CONTRACT.contact_email_column_id,
+                            "type": "email",
+                            "email": email,
+                            "text": email,
+                        },
+                        {
+                            "id": (
+                                BOARD_CONTRACT.contact_accounts_relation_column_id
+                            ),
+                            "type": "board_relation",
+                            "linked_item_ids": ["1661824839"],
+                        },
+                    ],
+                }
+            ],
+        }
+
 
 @pytest.fixture
 def database():
@@ -282,7 +381,7 @@ def add_claimed_job(session_factory, asset: EmailAssetIdentity) -> ProcessingJob
 def dependencies(
     monday: FakeMonday,
     postcode_client: FakePostcodeClient,
-    accounts_client: FlakyAccountsClient,
+    accounts_client: Any,
     *,
     excluded_group_ids: tuple[str, ...] = (),
     account_requester_domain_aliases: Mapping[
@@ -295,6 +394,11 @@ def dependencies(
         accounts=AccountsIndexService(
             client=accounts_client,
             board_id=BOARD_CONTRACT.accounts_board_id,
+            cache_ttl_seconds=0,
+        ),
+        contacts=ContactsIndexService(
+            client=accounts_client,
+            board_id=BOARD_CONTRACT.contacts_board_id,
             cache_ttl_seconds=0,
         ),
         publication_gate=PublicationGate(),
@@ -339,6 +443,57 @@ def test_shadow_pipeline_completes_without_monday_mutation(database) -> None:
         assert item.postcode_result_json["labelId"] == 115
         assert item.account_match_json["accountItemId"] == "99"
         assert monday.mutations == []
+
+
+def test_pipeline_resolves_shared_domain_by_unique_contact_email(database) -> None:
+    requester_email = "s.morrissey@encon.co.uk"
+    content = eml_bytes(
+        from_value=f"Sarah Morrissey <{requester_email}>",
+    )
+    asset = identity(content)
+    job = add_claimed_job(database, asset)
+    monday = FakeMonday(sales_item(asset), content)
+    accounts_client = ContactAwareAccountsClient()
+
+    outcome = run_pipeline_job(
+        database,
+        job.id,
+        worker_id="worker-a",
+        dependencies=dependencies(
+            monday,
+            FakePostcodeClient(
+                requester_domain="encon.co.uk",
+                company="Encon Group",
+            ),
+            accounts_client,
+        ),
+        mode="shadow",
+        now=NOW,
+    )
+
+    with database() as session:
+        completed = session.get(ProcessingJob, job.id)
+        item = session.query(ProcessingItem).one()
+        assert completed is not None
+        assert outcome == "shadow_completed"
+        assert completed.result_json["requester"]["emailAddressSha256"] == (
+            hashlib.sha256(requester_email.encode("utf-8")).hexdigest()
+        )
+        assert requester_email not in json.dumps(completed.result_json).casefold()
+        assert completed.result_json["account"]["reason"] == (
+            "unique_contact_email"
+        )
+        assert completed.result_json["account"]["accountItemId"] == (
+            "1661824839"
+        )
+        assert completed.result_json["account"]["contactItemId"] == (
+            "1662713491"
+        )
+        assert item.account_match_json["contactCandidateIds"] == [
+            "1662713491"
+        ]
+    assert accounts_client.account_page_calls == 1
+    assert accounts_client.contact_page_calls == 1
 
 
 def test_revalidation_does_not_require_download_url_after_extraction(

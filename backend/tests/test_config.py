@@ -51,6 +51,7 @@ def test_settings_normalise_phase_one_configuration() -> None:
     assert settings.internal_email_domains == ["taperedplus.co.uk", "example.com"]
     assert settings.sales_board_id == BOARD_CONTRACT.sales_board_id
     assert settings.accounts_board_id == BOARD_CONTRACT.accounts_board_id
+    assert settings.contacts_board_id == BOARD_CONTRACT.contacts_board_id
     assert settings.processing_pipeline_version == build_processing_pipeline_version(
         "gemini-test-model"
     )
@@ -152,9 +153,10 @@ def test_allowlist_mode_requires_at_least_one_item() -> None:
 
 def test_runtime_board_ids_form_the_schema_contract() -> None:
     values = settings_values()
-    values.update(sales_board_id=123, accounts_board_id=456)
+    values.update(sales_board_id=123, accounts_board_id=456, contacts_board_id=789)
 
     settings = Settings(_env_file=None, **values)
 
     assert settings.board_contract.sales_board_id == 123
     assert settings.board_contract.accounts_board_id == 456
+    assert settings.board_contract.contacts_board_id == 789

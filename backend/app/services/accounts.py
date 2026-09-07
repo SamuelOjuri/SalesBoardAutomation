@@ -1,4 +1,4 @@
-"""Fully paginated, duplicate-safe Accounts board index."""
+"""Fully paginated, duplicate-safe Accounts and Contacts indexes."""
 
 from __future__ import annotations
 
@@ -12,12 +12,17 @@ from typing import Any, Literal, Protocol
 
 from app.behavioral_contract import AccountResolution, BEHAVIORAL_CONTRACT
 from app.config import BOARD_CONTRACT
-from app.services.requester_identity import RequesterIdentity, normalize_domain
+from app.services.requester_identity import (
+    RequesterIdentity,
+    email_address_sha256,
+    normalize_domain,
+)
 
 
 AccountMatchReason = Literal[
     "unique_domain",
     "unique_domain_and_name",
+    "unique_contact_email",
     "unique_domain_alias_website",
     "unique_exact_name",
     "not_found_or_ambiguous",
@@ -50,6 +55,16 @@ class AccountsReader(Protocol):
     ) -> Mapping[str, Any]: ...
 
     def load_account_item(self, item_id: str) -> Mapping[str, Any] | None: ...
+
+
+class ContactsReader(Protocol):
+    def load_contacts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +103,35 @@ class AccountsIndex:
 
 
 @dataclass(frozen=True, slots=True)
+class ContactRecord:
+    item_id: str
+    name: str
+    active: bool
+    email_address_sha256: str | None
+    account_item_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ContactsIndex:
+    contacts: tuple[ContactRecord, ...]
+
+    def matching_email_sha256(self, value: str) -> tuple[ContactRecord, ...]:
+        return tuple(
+            contact
+            for contact in self.contacts
+            if contact.active and contact.email_address_sha256 == value
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AccountMatchResult:
     resolution: AccountResolution
     account: AccountRecord | None
     reason: AccountMatchReason
     domain_candidate_ids: tuple[str, ...]
     name_candidate_ids: tuple[str, ...]
+    contact: ContactRecord | None
+    contact_candidate_ids: tuple[str, ...]
 
 
 def match_account(
@@ -102,6 +140,7 @@ def match_account(
     *,
     allow_name_fallback: bool = False,
     account_domain_aliases: Mapping[str, Sequence[str]] | None = None,
+    contacts: ContactsIndex | None = None,
 ) -> AccountMatchResult:
     eligible = index.eligible_accounts
     direct_domain_matches = tuple(
@@ -145,6 +184,15 @@ def match_account(
     direct_domain_name_matches = tuple(
         account for account in direct_domain_matches if account in name_matches
     )
+    requester_email_sha256 = (
+        requester.email_address_sha256
+        or email_address_sha256(requester.email_address)
+    )
+    contact_matches = (
+        contacts.matching_email_sha256(requester_email_sha256)
+        if contacts is not None and requester_email_sha256 is not None
+        else ()
+    )
 
     if (
         len(domain_matches) == 1
@@ -164,6 +212,28 @@ def match_account(
             domain_matches,
             name_matches,
         )
+    if len(direct_domain_matches) > 1 and len(contact_matches) == 1:
+        contact = contact_matches[0]
+        linked_eligible_accounts = tuple(
+            account
+            for account in eligible
+            if account.item_id in contact.account_item_ids
+        )
+        if (
+            len(linked_eligible_accounts) == 1
+            and linked_eligible_accounts[0] in direct_domain_matches
+            and not _name_evidence_conflicts(
+                linked_eligible_accounts[0], name_matches
+            )
+        ):
+            return _match_result(
+                linked_eligible_accounts[0],
+                "unique_contact_email",
+                domain_matches,
+                name_matches,
+                contact=contact,
+                contact_matches=contact_matches,
+            )
     if (
         not direct_domain_matches
         and len(website_corroborated_alias_matches) == 1
@@ -192,6 +262,8 @@ def match_account(
         reason="not_found_or_ambiguous",
         domain_candidate_ids=_candidate_ids(domain_matches),
         name_candidate_ids=_candidate_ids(name_matches),
+        contact=None,
+        contact_candidate_ids=_contact_candidate_ids(contact_matches),
     )
 
 
@@ -218,11 +290,15 @@ def _match_result(
     reason: Literal[
         "unique_domain",
         "unique_domain_and_name",
+        "unique_contact_email",
         "unique_domain_alias_website",
         "unique_exact_name",
     ],
     domain_matches: tuple[AccountRecord, ...],
     name_matches: tuple[AccountRecord, ...],
+    *,
+    contact: ContactRecord | None = None,
+    contact_matches: tuple[ContactRecord, ...] = (),
 ) -> AccountMatchResult:
     return AccountMatchResult(
         resolution=AccountResolution.MATCHED,
@@ -230,11 +306,19 @@ def _match_result(
         reason=reason,
         domain_candidate_ids=_candidate_ids(domain_matches),
         name_candidate_ids=_candidate_ids(name_matches),
+        contact=contact,
+        contact_candidate_ids=_contact_candidate_ids(contact_matches),
     )
 
 
 def _candidate_ids(accounts: tuple[AccountRecord, ...]) -> tuple[str, ...]:
     return tuple(account.item_id for account in accounts)
+
+
+def _contact_candidate_ids(
+    contacts: tuple[ContactRecord, ...],
+) -> tuple[str, ...]:
+    return tuple(contact.item_id for contact in contacts)
 
 
 def _normalize_account_domain_aliases(
@@ -359,6 +443,91 @@ class AccountsIndexService:
             cursor = next_cursor
 
 
+class ContactsIndexService:
+    def __init__(
+        self,
+        *,
+        client: ContactsReader,
+        board_id: int,
+        cache_ttl_seconds: float = 300.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if board_id <= 0:
+            raise ValueError("board_id must be positive")
+        if cache_ttl_seconds < 0:
+            raise ValueError("cache_ttl_seconds must not be negative")
+        self._client = client
+        self._board_id = board_id
+        self._cache_ttl_seconds = cache_ttl_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._cached_index: ContactsIndex | None = None
+        self._cache_expires_at = 0.0
+
+    def load_index(self, *, force_refresh: bool = False) -> ContactsIndex:
+        now = self._clock()
+        if (
+            not force_refresh
+            and self._cached_index is not None
+            and now < self._cache_expires_at
+        ):
+            return self._cached_index
+
+        with self._lock:
+            now = self._clock()
+            if (
+                not force_refresh
+                and self._cached_index is not None
+                and now < self._cache_expires_at
+            ):
+                return self._cached_index
+            index = self._fetch_all_pages()
+            self._cached_index = index
+            self._cache_expires_at = self._clock() + self._cache_ttl_seconds
+            return index
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._cached_index = None
+            self._cache_expires_at = 0.0
+
+    def _fetch_all_pages(self) -> ContactsIndex:
+        contacts: list[ContactRecord] = []
+        seen_item_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        cursor: str | None = None
+
+        while True:
+            page = self._client.load_contacts_page(
+                self._board_id,
+                cursor=cursor,
+                limit=500,
+            )
+            raw_items = page.get("items")
+            if not isinstance(raw_items, list):
+                raise AccountsContractError("Contacts page items must be a list")
+            for raw_item in raw_items:
+                if not isinstance(raw_item, Mapping):
+                    raise AccountsContractError("Contact item must be an object")
+                contact = parse_contact_item(raw_item)
+                if contact.item_id in seen_item_ids:
+                    raise AccountsContractError(
+                        f"Monday returned duplicate Contact item {contact.item_id}"
+                    )
+                seen_item_ids.add(contact.item_id)
+                contacts.append(contact)
+
+            next_cursor = page.get("cursor")
+            if next_cursor is None:
+                return ContactsIndex(tuple(contacts))
+            if not isinstance(next_cursor, str) or not next_cursor.strip():
+                raise AccountsContractError("Contacts page cursor is malformed")
+            if next_cursor in seen_cursors:
+                raise AccountsContractError("Contacts pagination cursor repeated")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+
 def parse_account_item(raw_item: Mapping[str, Any]) -> AccountRecord:
     item_id = str(raw_item.get("id", "")).strip()
     if not item_id.isdecimal() or int(item_id) <= 0:
@@ -396,11 +565,52 @@ def parse_account_item(raw_item: Mapping[str, Any]) -> AccountRecord:
     )
 
 
+def parse_contact_item(raw_item: Mapping[str, Any]) -> ContactRecord:
+    item_id = str(raw_item.get("id", "")).strip()
+    if not item_id.isdecimal() or int(item_id) <= 0:
+        raise AccountsContractError("Contact item ID must be a positive decimal")
+    name = raw_item.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise AccountsContractError(f"Contact item {item_id} has no name")
+    state = raw_item.get("state")
+    if not isinstance(state, str):
+        raise AccountsContractError(f"Contact item {item_id} has no typed state")
+
+    columns = raw_item.get("column_values")
+    if not isinstance(columns, list):
+        raise AccountsContractError(
+            f"Contact item {item_id} column_values must be a list"
+        )
+    email_column = _find_column(
+        columns,
+        BOARD_CONTRACT.contact_email_column_id,
+        "email",
+        item_id,
+        item_kind="Contact",
+    )
+    accounts_column = _find_column(
+        columns,
+        BOARD_CONTRACT.contact_accounts_relation_column_id,
+        "board_relation",
+        item_id,
+        item_kind="Contact",
+    )
+    return ContactRecord(
+        item_id=item_id,
+        name=" ".join(name.split()),
+        active=state.casefold() == "active",
+        email_address_sha256=_parse_contact_email_sha256(email_column),
+        account_item_ids=_parse_linked_account_ids(accounts_column, item_id),
+    )
+
+
 def _find_column(
     columns: list[Any],
     column_id: str,
     expected_type: str,
     item_id: str,
+    *,
+    item_kind: str = "Account",
 ) -> Mapping[str, Any]:
     matches = [
         column
@@ -409,7 +619,7 @@ def _find_column(
     ]
     if len(matches) != 1 or matches[0].get("type") != expected_type:
         raise AccountsContractError(
-            f"Account item {item_id} has an invalid {column_id} column"
+            f"{item_kind} item {item_id} has an invalid {column_id} column"
         )
     return matches[0]
 
@@ -421,6 +631,43 @@ def _parse_email_domain(column: Mapping[str, Any]) -> str | None:
     if raw_text is None or raw_text == "":
         return None
     return normalize_domain(raw_text)
+
+
+def _parse_contact_email_sha256(column: Mapping[str, Any]) -> str | None:
+    raw_email = column.get("email")
+    if raw_email is None and "value" in column:
+        decoded = _decode_json_value(column.get("value"))
+        if isinstance(decoded, Mapping):
+            raw_email = decoded.get("email")
+        elif decoded is not None:
+            return None
+    if raw_email is None or raw_email == "":
+        return None
+    return email_address_sha256(raw_email)
+
+
+def _parse_linked_account_ids(
+    column: Mapping[str, Any], item_id: str
+) -> tuple[str, ...]:
+    raw_ids = column.get("linked_item_ids")
+    if not isinstance(raw_ids, list):
+        raise AccountsContractError(
+            f"Contact item {item_id} Accounts links must be a list"
+        )
+    account_ids: list[str] = []
+    for raw_id in raw_ids:
+        if isinstance(raw_id, bool):
+            raise AccountsContractError(
+                f"Contact item {item_id} Account link ID is malformed"
+            )
+        account_id = str(raw_id).strip()
+        if not account_id.isdecimal() or int(account_id) <= 0:
+            raise AccountsContractError(
+                f"Contact item {item_id} Account link ID is malformed"
+            )
+        if account_id not in account_ids:
+            account_ids.append(account_id)
+    return tuple(account_ids)
 
 
 def _parse_duplicate_label_ids(

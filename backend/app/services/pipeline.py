@@ -24,6 +24,7 @@ from app.publication_gate import PublicationGate
 from app.services.accounts import (
     AccountMatchResult,
     AccountsIndexService,
+    ContactsIndexService,
     match_account,
 )
 from app.services.email_parser import ParsedEmail, process_email_content
@@ -50,6 +51,7 @@ from app.services.publication import (
 from app.services.requester_identity import (
     RequesterIdentity,
     RequesterSource,
+    email_address_sha256,
     extract_requester_identity,
     normalize_domain,
 )
@@ -77,6 +79,7 @@ class PipelineDependencies:
     monday: PipelineMondayClient
     postcode_client: PostcodeExtractionClient
     accounts: AccountsIndexService
+    contacts: ContactsIndexService
     publication_gate: PublicationGate
     internal_email_domains: tuple[str, ...]
     excluded_group_ids: tuple[str, ...] = ()
@@ -306,12 +309,25 @@ def _run_matching_stage(
         return False
     result = _current_result(job, ProcessingJobStage.EXTRACTING.value)
     requester = _requester_from_payload(result.get("requester"))
+    accounts_index = dependencies.accounts.load_index()
     account_match = match_account(
-        dependencies.accounts.load_index(),
+        accounts_index,
         requester,
         allow_name_fallback=dependencies.allow_name_fallback,
         account_domain_aliases=dependencies.account_requester_domain_aliases,
     )
+    if (
+        account_match.account is None
+        and len(account_match.domain_candidate_ids) > 1
+        and requester.email_address_sha256 is not None
+    ):
+        account_match = match_account(
+            accounts_index,
+            requester,
+            contacts=dependencies.contacts.load_index(),
+            allow_name_fallback=dependencies.allow_name_fallback,
+            account_domain_aliases=dependencies.account_requester_domain_aliases,
+        )
 
     with session_factory() as session:
         current = lock_owned_job(session, job_id, worker_id=worker_id)
@@ -707,6 +723,10 @@ def _requester_payload(requester: RequesterIdentity) -> dict[str, Any]:
         "company": requester.company,
         "source": requester.source,
         "websiteDomains": list(requester.website_domains),
+        "emailAddressSha256": (
+            requester.email_address_sha256
+            or email_address_sha256(requester.email_address)
+        ),
     }
 
 
@@ -717,6 +737,16 @@ def _requester_from_payload(value: object) -> RequesterIdentity:
         raise RuntimeError("requester checkpoint source is invalid")
     domain = payload.get("domain")
     company = payload.get("company")
+    raw_email_address_sha256 = payload.get("emailAddressSha256")
+    if raw_email_address_sha256 is not None and (
+        not isinstance(raw_email_address_sha256, str)
+        or len(raw_email_address_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in raw_email_address_sha256
+        )
+    ):
+        raise RuntimeError("requester checkpoint email hash is invalid")
     raw_website_domains = payload.get("websiteDomains", [])
     if not isinstance(raw_website_domains, list) or not all(
         isinstance(value, str) for value in raw_website_domains
@@ -735,6 +765,7 @@ def _requester_from_payload(value: object) -> RequesterIdentity:
         company=str(company) if company is not None else None,
         source=cast(RequesterSource, source),
         website_domains=tuple(website_domains),
+        email_address_sha256=raw_email_address_sha256,
     )
 
 
@@ -743,8 +774,10 @@ def _account_payload(result: AccountMatchResult) -> dict[str, Any]:
         "resolution": str(result.resolution),
         "reason": result.reason,
         "accountItemId": result.account.item_id if result.account else None,
+        "contactItemId": result.contact.item_id if result.contact else None,
         "domainCandidateIds": list(result.domain_candidate_ids),
         "nameCandidateIds": list(result.name_candidate_ids),
+        "contactCandidateIds": list(result.contact_candidate_ids),
     }
 
 

@@ -190,6 +190,54 @@ def test_accounts_loader_uses_typed_values_and_continues_from_cursor() -> None:
     assert "values" in first_call["json"]["query"]
 
 
+def test_contacts_loader_uses_typed_values_and_continues_from_cursor() -> None:
+    fake_session = QueuedFakeSession(
+        [
+            {
+                "data": {
+                    "boards": [
+                        {
+                            "id": str(BOARD_CONTRACT.contacts_board_id),
+                            "items_page": {"cursor": "next", "items": []},
+                        }
+                    ]
+                }
+            },
+            {"data": {"next_items_page": {"cursor": None, "items": []}}},
+        ]
+    )
+    client = MondayClient(
+        access_token="token",
+        api_version="2026-07",
+        session=cast(requests.Session, fake_session),
+    )
+
+    first_page = client.load_contacts_page(BOARD_CONTRACT.contacts_board_id)
+    final_page = client.load_contacts_page(
+        BOARD_CONTRACT.contacts_board_id,
+        cursor=first_page["cursor"],
+    )
+
+    assert final_page["cursor"] is None
+    first_call, second_call = fake_session.calls
+    assert first_call["json"]["variables"] == {
+        "board_ids": [str(BOARD_CONTRACT.contacts_board_id)],
+        "column_ids": [
+            BOARD_CONTRACT.contact_email_column_id,
+            BOARD_CONTRACT.contact_accounts_relation_column_id,
+        ],
+        "limit": 500,
+    }
+    assert second_call["json"]["variables"]["cursor"] == "next"
+    assert "next_items_page" in second_call["json"]["query"]
+    assert "... on EmailValue" in first_call["json"]["query"]
+    assert "... on BoardRelationValue" in first_call["json"]["query"]
+    assert "linked_item_ids" in first_call["json"]["query"]
+    assert first_call["json"]["query"].count("{") == first_call["json"][
+        "query"
+    ].count("}")
+
+
 def test_selected_account_loader_returns_none_when_item_disappears() -> None:
     fake_session = FakeSession({"data": {"items": []}})
     client = MondayClient(

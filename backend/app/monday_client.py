@@ -41,6 +41,25 @@ _ACCOUNT_ITEM_FIELDS = """
     }
 """
 
+_CONTACT_ITEM_FIELDS = """
+    id
+    name
+    state
+    board { id }
+    column_values(ids: $column_ids) {
+        id
+        type
+        value
+        ... on EmailValue {
+            email
+            text
+        }
+        ... on BoardRelationValue {
+            linked_item_ids
+        }
+    }
+"""
+
 _SALES_PUBLICATION_COLUMN_IDS = frozenset(
     {
         BOARD_CONTRACT.postcode_column_id,
@@ -398,6 +417,73 @@ class MondayClient:
         if not isinstance(item, Mapping):
             raise MondayAPIError("Monday returned a malformed Account item")
         return item
+
+    def load_contacts_page(
+        self,
+        board_id: int,
+        *,
+        cursor: str | None = None,
+        limit: int = 500,
+    ) -> Mapping[str, Any]:
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        variables: dict[str, Any] = {
+            "column_ids": [
+                BOARD_CONTRACT.contact_email_column_id,
+                BOARD_CONTRACT.contact_accounts_relation_column_id,
+            ],
+            "limit": limit,
+        }
+        if cursor is None:
+            query = f"""
+                query ContactsPage(
+                    $board_ids: [ID!]!,
+                    $column_ids: [String!]!,
+                    $limit: Int!
+                ) {{
+                    boards(ids: $board_ids) {{
+                        id
+                        items_page(limit: $limit) {{
+                            cursor
+                            items {{
+                                {_CONTACT_ITEM_FIELDS}
+                            }}
+                        }}
+                    }}
+                }}
+            """
+            variables["board_ids"] = [str(board_id)]
+            payload = self._execute(query, variables)
+            boards = payload.get("boards")
+            if not isinstance(boards, list) or len(boards) != 1:
+                raise MondayAPIError("Monday returned an unexpected Contacts board count")
+            board = boards[0]
+            if not isinstance(board, Mapping):
+                raise MondayAPIError("Monday returned a malformed Contacts board")
+            page = board.get("items_page")
+        else:
+            if not cursor.strip():
+                raise ValueError("cursor must not be empty")
+            query = f"""
+                query ContactsNextPage(
+                    $cursor: String!,
+                    $column_ids: [String!]!,
+                    $limit: Int!
+                ) {{
+                    next_items_page(cursor: $cursor, limit: $limit) {{
+                        cursor
+                        items {{
+                            {_CONTACT_ITEM_FIELDS}
+                        }}
+                    }}
+                }}
+            """
+            variables["cursor"] = cursor
+            payload = self._execute(query, variables)
+            page = payload.get("next_items_page")
+        if not isinstance(page, Mapping):
+            raise MondayAPIError("Monday returned a malformed Contacts page")
+        return page
 
     def download_asset(
         self,

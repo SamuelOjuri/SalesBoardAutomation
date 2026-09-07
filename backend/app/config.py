@@ -15,7 +15,7 @@ POSTCODE_EXTRACTION_REVISION = "postcode-extraction-v4"
 POSTCODE_NORMALIZATION_REVISION = "postcode-area-v1"
 POSTCODE_LABEL_MAPPING_REVISION = "postcode-label-mapping-v1"
 REQUESTER_IDENTITY_REVISION = "requester-identity-v3"
-ACCOUNT_MATCHING_REVISION = "account-matching-v4"
+ACCOUNT_MATCHING_REVISION = "account-matching-v5"
 DEFAULT_EXCLUDED_SALES_GROUP_IDS = ("group_mm5eqjq4",)
 DEFAULT_INTERNAL_COMPANY_ALIASES = (
     "TaperedPlus",
@@ -200,11 +200,14 @@ REQUIRED_POSTCODE_LABELS = tuple(
 class BoardContract:
     sales_board_id: int = 5_100_711_564
     accounts_board_id: int = 1_654_217_230
+    contacts_board_id: int = 1_654_217_228
     email_file_column_id: str = "file_mm5erpbb"
     accounts_relation_column_id: str = "board_relation_mm64107r"
     postcode_column_id: str = "dropdown_mm60y5x8"
     account_email_domain_column_id: str = "text_mm6bymv5"
     account_duplicate_column_id: str = "dropdown_mm6cxq2p"
+    contact_email_column_id: str = "contact_email"
+    contact_accounts_relation_column_id: str = "contact_account"
     required_postcode_labels: tuple[
         PostcodeLabelContract, ...
     ] = REQUIRED_POSTCODE_LABELS
@@ -260,6 +263,7 @@ class Settings(BaseSettings):
 
     sales_board_id: int = Field(default=BOARD_CONTRACT.sales_board_id, gt=0)
     accounts_board_id: int = Field(default=BOARD_CONTRACT.accounts_board_id, gt=0)
+    contacts_board_id: int = Field(default=BOARD_CONTRACT.contacts_board_id, gt=0)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -476,6 +480,7 @@ class Settings(BaseSettings):
         return BoardContract(
             sales_board_id=self.sales_board_id,
             accounts_board_id=self.accounts_board_id,
+            contacts_board_id=self.contacts_board_id,
         )
 
 

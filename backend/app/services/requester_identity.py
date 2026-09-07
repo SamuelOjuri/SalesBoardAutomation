@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -55,7 +56,10 @@ _WEBSITE_CANDIDATE_PATTERN = re.compile(
 )
 _MAX_SIGNATURE_WEBSITE_LINE_LENGTH = 8_192
 _MAX_WRAPPED_URL_DEPTH = 2
-_DOMAIN_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
+_DOMAIN_EXTRACTOR = tldextract.TLDExtract(
+    suffix_list_urls=(),
+    cache_dir=None,
+)
 
 
 RequesterSource = Literal["top_level_sender", "forwarded_sender", "not_found"]
@@ -68,6 +72,7 @@ class RequesterIdentity:
     company: str | None
     source: RequesterSource
     website_domains: tuple[str, ...] = ()
+    email_address_sha256: str | None = None
 
 
 def extract_requester_identity(
@@ -133,6 +138,33 @@ def normalize_domain(value: object) -> str | None:
     return registrable.casefold() or None
 
 
+def normalize_email_address(value: object) -> str | None:
+    """Return one exact, lower-cased mailbox with an IDNA-normalized host."""
+
+    addresses = getaddresses([str(value)])
+    if len(addresses) != 1:
+        return None
+    _display_name, raw_address = addresses[0]
+    local_part, separator, raw_domain = raw_address.strip().rpartition("@")
+    if (
+        not separator
+        or not local_part
+        or any(character.isspace() for character in local_part)
+    ):
+        return None
+    normalized_host = _normalize_host_domain(raw_domain)
+    if normalized_host is None or normalize_domain(normalized_host) is None:
+        return None
+    return f"{local_part.casefold()}@{normalized_host}"
+
+
+def email_address_sha256(value: object) -> str | None:
+    normalized = normalize_email_address(value)
+    if normalized is None:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def _normalize_host_domain(value: object) -> str | None:
     candidate = str(value).strip().casefold().rstrip(".")
     if candidate.startswith("www."):
@@ -163,6 +195,7 @@ def _identity(
         company=company,
         source=source,
         website_domains=website_domains,
+        email_address_sha256=email_address_sha256(email_address),
     )
 
 
@@ -264,15 +297,15 @@ def _first_mailbox(
     domain_aliases: Mapping[str, str],
 ) -> tuple[str, str] | None:
     for _display_name, raw_address in getaddresses(values):
-        local_part, separator, raw_domain = raw_address.strip().rpartition("@")
-        if not separator or not local_part:
+        email_address = normalize_email_address(raw_address)
+        if email_address is None:
             continue
-        normalized_host = _normalize_host_domain(raw_domain)
+        _local_part, _separator, normalized_host = email_address.rpartition("@")
         domain = normalize_domain(normalized_host)
-        if normalized_host is None or domain is None:
+        if domain is None:
             continue
         domain = domain_aliases.get(normalized_host, domain)
-        return f"{local_part.casefold()}@{normalized_host}", domain
+        return email_address, domain
     return None
 
 

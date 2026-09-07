@@ -21,7 +21,7 @@ from app.config import Settings, get_settings
 from app.database import create_database_engine, create_session_factory
 from app.monday_client import MondayClient
 from app.publication_gate import validate_schema_at_startup
-from app.services.accounts import AccountsIndexService
+from app.services.accounts import AccountsIndexService, ContactsIndexService
 from app.services.pipeline import (
     PipelineDependencies,
     PipelineExecutionDisabled,
@@ -122,10 +122,15 @@ def create_worker_runtime(
         client=monday_client,
         board_id=runtime_settings.accounts_board_id,
     )
+    contacts = ContactsIndexService(
+        client=monday_client,
+        board_id=runtime_settings.contacts_board_id,
+    )
     dependencies = PipelineDependencies(
         monday=monday_client,
         postcode_client=GeminiPostcodeClient.from_settings(runtime_settings),
         accounts=accounts,
+        contacts=contacts,
         publication_gate=gate,
         internal_email_domains=tuple(runtime_settings.internal_email_domains),
         excluded_group_ids=tuple(runtime_settings.processing_excluded_group_ids),
