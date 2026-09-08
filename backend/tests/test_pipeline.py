@@ -28,6 +28,7 @@ from app.services.pipeline import (
     run_pipeline_job,
 )
 from app.services.postcode import DesignParameterExtraction
+from app.services.postcode_evidence import PostcodeEvidence
 from app.services.worker import claim_next_job, retry_or_fail_job
 
 
@@ -177,6 +178,10 @@ class FakePostcodeClient:
         return DesignParameterExtraction(
             post_code="WA4 6NL",
             company=self.company,
+            postcode_evidence=PostcodeEvidence(
+                project_identity=None, current_project_quote=None,
+                source_project_quote=None, address_quote="WA4 6NL",
+            ),
         )
 
 

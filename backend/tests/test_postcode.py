@@ -10,6 +10,7 @@ from app.services.postcode import (
     resolve_postcode_label,
     validate_company_evidence,
 )
+from app.services.postcode_evidence import PostcodeEvidence
 
 
 def postcode_column() -> dict[str, object]:
@@ -46,10 +47,16 @@ def test_extract_postcode_area_preserves_reference_behaviour(
 
 def test_extract_parameters_uses_strict_model_result() -> None:
     extracted = DesignParameterExtraction.model_validate(
-        {"post_code": "wa46nl", "company": "Kingsgate Construction"}
+        {
+            "post_code": "wa46nl", "company": "Kingsgate Construction",
+            "postcode_evidence": {
+                "project_identity": None, "current_project_quote": None,
+                "source_project_quote": None, "address_quote": "Site: WA4 6NL",
+            },
+        }
     )
 
-    assert extract_parameters("untrusted email", extracted_parameters=extracted) == {
+    assert extract_parameters("Site: WA4 6NL", extracted_parameters=extracted) == {
         "Post Code": "WA"
     }
 
@@ -120,10 +127,16 @@ def test_structured_project_area_rejects_inference_and_ambiguity(
 
 
 def test_conflicting_model_and_structured_project_areas_fail_closed() -> None:
-    extracted = DesignParameterExtraction(post_code="WA4 6NL", company=None)
+    extracted = DesignParameterExtraction(
+        post_code="WA4 6NL", company=None,
+        postcode_evidence=PostcodeEvidence(
+            project_identity=None, current_project_quote=None,
+            source_project_quote=None, address_quote="Site: WA4 6NL",
+        ),
+    )
 
     assert extract_parameters(
-        "Project: Luton Sixth Form College, LU",
+        "Project: Luton Sixth Form College, LU\nSite: WA4 6NL",
         extracted_parameters=extracted,
     ) == {"Post Code": "Not provided"}
 

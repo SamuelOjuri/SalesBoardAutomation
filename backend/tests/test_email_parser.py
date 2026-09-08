@@ -24,6 +24,7 @@ from app.services.postcode import (
     GeminiPostcodeClient,
     analyze_downloaded_email_assets,
 )
+from app.services.postcode_evidence import PostcodeEvidence
 
 
 def _postcode_column() -> dict[str, object]:
@@ -126,10 +127,12 @@ def _downloaded_asset(
 
 class FakeExtractionClient:
     def __init__(
-        self, post_code: str | None, company: str | None = None
+        self, post_code: str | None, company: str | None = None,
+        evidence: PostcodeEvidence | None = None,
     ) -> None:
         self.post_code = post_code
         self.company = company
+        self.evidence = evidence
         self.context = ""
         self.pdf_filenames: list[str] = []
         self.image_filenames: list[str] = []
@@ -161,6 +164,12 @@ class FakeExtractionClient:
         return DesignParameterExtraction(
             post_code=self.post_code,
             company=self.company,
+            postcode_evidence=self.evidence or (
+                PostcodeEvidence(
+                    project_identity=None, current_project_quote=None,
+                    source_project_quote=None, address_quote=self.post_code,
+                ) if self.post_code else None
+            ),
         )
 
 
@@ -218,12 +227,15 @@ def test_msg_uses_html_fallback_and_closes_message(monkeypatch: pytest.MonkeyPat
 
 def test_assets_are_processed_in_numeric_id_order(tmp_path: Path) -> None:
     asset_10 = _downloaded_asset(
-        tmp_path, asset_id="10", content=_eml_bytes("Second email")
+        tmp_path, asset_id="10", content=_eml_bytes("Second email. Project: Example Hall, WA\nWA4 6NL")
     )
     asset_2 = _downloaded_asset(
-        tmp_path, asset_id="2", content=_eml_bytes("First email")
+        tmp_path, asset_id="2", content=_eml_bytes("First email. Project: Example Hall, WA\nWA4 6NL")
     )
-    client = FakeExtractionClient("WA4 6NL")
+    client = FakeExtractionClient("WA4 6NL", evidence=PostcodeEvidence(
+        project_identity="Example Hall", current_project_quote="Project: Example Hall, WA",
+        source_project_quote="Project: Example Hall, WA", address_quote="WA4 6NL",
+    ))
 
     result = analyze_downloaded_email_assets(
         [asset_10, asset_2],
@@ -305,7 +317,10 @@ def test_explicit_project_field_area_is_used_when_model_returns_null(
         ),
     )
     asset = _downloaded_asset(tmp_path, asset_id="11", content=content)
-    client = FakeExtractionClient(None, "AccuRoof")
+    client = FakeExtractionClient(None, "AccuRoof", evidence=PostcodeEvidence(
+        project_identity=None, current_project_quote=None, source_project_quote=None,
+        address_quote="PROJECT DETAILS\nLuton Sixth Form College, LU",
+    ))
     postcode_column = _postcode_column()
     postcode_column["settings"] = {
         "labels": [{"id": 67, "label": "LU", "is_deactivated": False}]

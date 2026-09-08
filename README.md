@@ -112,8 +112,9 @@ revalidated immediately before parsing.
 
 `backend/app/services/postcode.py` sends the combined untrusted content to the
 configured Gemini model using a strict Pydantic response schema that can
-return only the project-location postcode and an explicitly stated requester
-company. Trusted requester metadata is derived before model extraction and is
+return only the project-location postcode, its supporting project/address
+evidence, and an explicitly stated requester company. Trusted requester metadata
+is derived before model extraction and is
 kept outside the untrusted-content boundary. The prompt and schema explicitly
 exclude sender, recipient, signature, and correspondence addresses from
 postcode selection. Model-supplied company evidence is accepted only when it
@@ -121,12 +122,33 @@ occurs as consecutive whole tokens in the extracted content and is not listed
 in `INTERNAL_COMPANY_ALIASES`. Company is secondary account-matching evidence
 only. Malformed or augmented model output is rejected.
 
+The model identifies the current project from the latest subject and unquoted
+message, then uses older messages or attachments only for that same project.
+`postcode_evidence.py` checks that the current-project quote comes from the
+owning email's latest section, that a distinctive literal project name or stable
+reference occurs in both project quotes, and that the source-project quote and
+address quote occur in the same individual message or attachment. Quotes tolerate
+case, whitespace, and reply-prefix differences; they cannot be stitched across
+sources. The selected full postcode must occur in the address quote, and an
+area-only selection must have an explicit structured Project-area suffix.
+Simple unnamed enquiries still work with an address quote, provided there is
+no quoted history, no competing email, and at most one processed attachment.
+Identifying which named project is active and which address is a site address
+remains a model decision; these checks validate its supporting evidence rather
+than inferring locations from project names.
+
 When the model omits a postcode, a deterministic fallback accepts only a
 one- or two-letter area explicitly written as a comma-separated suffix in a
 structured `Project`, `Project Name`, or `Project Details` field (for example,
 `Project: Luton Sixth Form College, LU`). It never derives an area from a place
 name, subject, filename, address, or prose. Conflicting structured candidates,
 or a disagreement between the model and the structured field, fail closed.
+The fallback runs within the evidenced current project's sources. Without model
+evidence it is limited to the latest message; quoted/attachment candidates need
+the project/address evidence even when the model's postcode itself is null.
+An invalid model selection or invalid evidence cannot trigger a fallback from
+another project. Existing normalization, dropdown mapping and fill-only
+publication behavior remain in place.
 
 The extracted postcode is reduced to its alphabetic area using the pinned
 reference behavior. `MondayClient.load_postcode_dropdown_column` obtains the
@@ -138,7 +160,8 @@ unmapped postcodes produce no Monday value.
 
 Extraction results contain only the area, resolved label ID/value, normalized
 company evidence, input asset IDs, and an extracted-text SHA-256. Raw email and
-attachment content is not returned or logged. Every job's pipeline identity is
+attachment content, including the model's supporting quotes, is not persisted
+in results or logged. Every job's pipeline identity is
 derived from the release, exact `GEMINI_MODEL`, postcode extraction,
 normalization, and dropdown-label mapping revisions, requester-identity
 revision, and Account matching revision. If `PROCESSING_PIPELINE_VERSION` is
