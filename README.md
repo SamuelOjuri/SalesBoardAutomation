@@ -351,6 +351,18 @@ Worker timing can be tuned with `WORKER_POLL_INTERVAL_SECONDS`,
 `WORKER_RETRY_BASE_SECONDS`, and `WORKER_RETRY_MAX_SECONDS`. The heartbeat
 interval must remain shorter than the lease timeout.
 
+The worker also uses the retry base and maximum for transient database connection
+failures during its processing loop. Each retry starts a new polling iteration
+with fresh sessions; delays double up to the maximum and reset after a successful
+iteration. Shutdown interrupts the retry wait. An already-committed job lease is
+left for normal stale-lease recovery rather than immediately replaying the job.
+Connection warnings omit exception messages, SQL, and query parameters.
+
+PostgreSQL intake uses `ON CONFLICT DO NOTHING` for concurrent processing-item
+creation, then retrieves and locks the row before queueing or coalescing work.
+The board/item uniqueness constraint remains enforced; non-PostgreSQL databases
+retain the savepoint-based fallback.
+
 ## Local setup
 
 Create a PostgreSQL database, install dependencies, and create a local `.env`

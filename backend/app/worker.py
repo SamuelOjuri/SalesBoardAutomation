@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterator, cast
 
+from psycopg import OperationalError as PsycopgOperationalError
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
@@ -293,6 +295,15 @@ def _error_is_retryable(error: BaseException) -> bool:
     return not isinstance(error, ValueError)
 
 
+def _is_transient_database_error(error: DBAPIError) -> bool:
+    if error.connection_invalidated:
+        return True
+    sqlstate = getattr(error.orig, "sqlstate", None)
+    if isinstance(sqlstate, str):
+        return sqlstate.startswith("08") or sqlstate in {"57P01", "57P02", "57P03"}
+    return isinstance(error.orig, PsycopgOperationalError)
+
+
 def run_worker(
     runtime: WorkerRuntime,
     *,
@@ -306,8 +317,30 @@ def run_worker(
             "processing_mode": runtime.settings.processing_mode,
         },
     )
+    retry_base = min(
+        runtime.settings.worker_retry_base_seconds,
+        runtime.settings.worker_retry_max_seconds,
+    )
+    retry_delay = retry_base
     while not stop.is_set():
-        processed = process_next_job(runtime)
+        try:
+            processed = process_next_job(runtime)
+        except DBAPIError as error:
+            if not _is_transient_database_error(error):
+                raise
+            logger.warning(
+                "worker database connection failed error_type=%s retry_in_seconds=%s",
+                type(error).__name__,
+                retry_delay,
+                extra={"worker_id": runtime.worker_id},
+            )
+            stop.wait(retry_delay)
+            retry_delay = min(
+                retry_delay * 2,
+                runtime.settings.worker_retry_max_seconds,
+            )
+            continue
+        retry_delay = retry_base
         if not processed:
             stop.wait(runtime.settings.worker_poll_interval_seconds)
     logger.info("background worker stopped", extra={"worker_id": runtime.worker_id})

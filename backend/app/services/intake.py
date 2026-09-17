@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -239,7 +240,24 @@ def queue_sales_item_snapshot(
     item = _processing_item_query(
         session, board_id=snapshot.board_id, item_id=snapshot.item_id
     ).one_or_none()
-    if item is None:
+    if (
+        item is None
+        and session.bind is not None
+        and session.bind.dialect.name == "postgresql"
+    ):
+        session.execute(
+            postgresql_insert(ProcessingItem)
+            .values(
+                board_id=snapshot.board_id,
+                item_id=snapshot.item_id,
+                state=ProcessingItemState.SCHEDULED.value,
+            )
+            .on_conflict_do_nothing(constraint="uq_processing_items_board_item")
+        )
+        item = _processing_item_query(
+            session, board_id=snapshot.board_id, item_id=snapshot.item_id
+        ).one()
+    elif item is None:
         candidate = ProcessingItem(
             board_id=snapshot.board_id,
             item_id=snapshot.item_id,

@@ -1,14 +1,25 @@
 import json
 import hashlib
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Session
 
 from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
-from app.models import ProcessingAudit, ProcessingJob, WebhookEvent
+from app.input_revision import compute_input_revision
+from app.models import (
+    ProcessingAudit,
+    ProcessingItem,
+    ProcessingJob,
+    ProcessingJobStatus,
+    WebhookEvent,
+)
 from app.services.intake import (
     IntakeContractError,
     download_email_assets,
@@ -232,6 +243,67 @@ def test_queue_coalesces_without_mutating_active_job_identity() -> None:
             assert second.item.supersession_requested_at is not None
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("inserted", "active_job_exists"),
+    [(True, False), (False, False), (False, True)],
+)
+def test_postgres_intake_insert_locks_item_before_queueing(
+    inserted: bool,
+    active_job_exists: bool,
+) -> None:
+    snapshot = parse_sales_item_snapshot(item_snapshot(), contract=BOARD_CONTRACT)
+    item = ProcessingItem(
+        id=uuid.uuid4(), board_id=snapshot.board_id, item_id=snapshot.item_id
+    )
+    job = ProcessingJob(
+        id=uuid.uuid4(),
+        input_revision=compute_input_revision(
+            tuple(asset.identity for asset in snapshot.email_assets)
+        ),
+        pipeline_version="test-v1",
+        status=ProcessingJobStatus.RUNNING.value,
+    )
+    session = MagicMock(spec=Session)
+    session.bind = MagicMock()
+    session.bind.dialect = postgresql.dialect()
+    item_query = session.query.return_value.filter_by.return_value
+    locked_item_query = item_query.with_for_update.return_value
+    locked_item_query.one_or_none.return_value = None
+    locked_item_query.one.return_value = item
+    job_query = session.query.return_value.filter.return_value.order_by.return_value
+    job_query.with_for_update.return_value.first.return_value = (
+        job if active_job_exists else None
+    )
+    session.execute.return_value.rowcount = int(inserted)
+
+    result = queue_sales_item_snapshot(session, snapshot, pipeline_version="test-v1")
+
+    session.execute.assert_called_once()
+    statement = session.execute.call_args.args[0]
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert "INSERT INTO processing_items" in str(compiled)
+    assert (
+        "ON CONFLICT ON CONSTRAINT uq_processing_items_board_item DO NOTHING"
+        in str(compiled)
+    )
+    assert compiled.params["board_id"] == snapshot.board_id
+    assert compiled.params["item_id"] == snapshot.item_id
+    assert item_query.with_for_update.call_count == 2
+    locked_item_query.one.assert_called_once()
+    assert result.item is item
+    if active_job_exists:
+        session.begin_nested.assert_not_called()
+        assert result.job is job
+        assert result.outcome == "coalesced"
+        assert result.created_job is False
+    else:
+        session.begin_nested.assert_called_once()
+        assert result.job.input_revision == job.input_revision
+        assert result.job.status == ProcessingJobStatus.SCHEDULED.value
+        assert result.outcome == "queued"
+        assert result.created_job is True
 
 
 def test_download_context_uses_asset_order_and_always_cleans_up() -> None:
