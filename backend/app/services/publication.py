@@ -102,6 +102,7 @@ def publish_sales_item(
     input_manifest: Sequence[Mapping[str, Any]] | None = None,
     postcode_label_id: int | None = None,
     account_item_id: str | None = None,
+    account_relation_populated: bool | None = None,
     accounts: AccountRevalidator | None = None,
     excluded_group_ids: Sequence[str] = (),
 ) -> PublicationResult:
@@ -115,7 +116,11 @@ def publish_sales_item(
     )
 
     account_is_eligible = False
-    if normalized_account_id is not None:
+    # A matching-stage hint only chooses the query; fresh snapshots below
+    # always decide whether a relation can be written.
+    raw_account = None
+    account_loaded = False
+    if normalized_account_id is not None and account_relation_populated is False:
         if accounts is None:
             raise ValueError("accounts is required for an Account candidate")
         raw_item, raw_account = client.load_sales_item_and_account_for_publication(
@@ -128,14 +133,7 @@ def publish_sales_item(
             input_manifest=input_manifest,
             excluded_group_ids=excluded_group_ids,
         )
-        selected_account = accounts.validate_selected_account_snapshot(
-            normalized_account_id, raw_account
-        )
-        account_is_eligible = (
-            selected_account is not None
-            and selected_account.item_id == normalized_account_id
-            and selected_account.eligible
-        )
+        account_loaded = True
     else:
         before = _load_current_snapshot(
             client,
@@ -144,6 +142,27 @@ def publish_sales_item(
             input_manifest=input_manifest,
             excluded_group_ids=excluded_group_ids,
         )
+
+    if normalized_account_id is not None and not before.linked_account_item_ids:
+        if accounts is None:
+            raise ValueError("accounts is required for an Account candidate")
+        if not account_loaded:
+            raw_item, raw_account = client.load_sales_item_and_account_for_publication(
+                normalized_item_id, normalized_account_id
+            )
+            before = _validate_current_snapshot(
+                raw_item, normalized_item_id, normalized_revision,
+                input_manifest=input_manifest, excluded_group_ids=excluded_group_ids,
+            )
+        if not before.linked_account_item_ids:
+            selected_account = accounts.validate_selected_account_snapshot(
+                normalized_account_id, raw_account
+            )
+            account_is_eligible = (
+                selected_account is not None
+                and selected_account.item_id == normalized_account_id
+                and selected_account.eligible
+            )
 
     postcode = _decide_column(
         before.postcode_label_ids,

@@ -11,7 +11,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from app.behavioral_contract import AccountResolution
 from app.config import BOARD_CONTRACT
 from app.database import Base, create_database_engine, create_session_factory
-from app.models import ReferenceIndexSnapshot
+from app.models import ReferenceIndexSnapshot, MondayUsage
 from app.services.accounts import (
     AccountsContractError,
     AccountsIndexService,
@@ -122,6 +122,10 @@ def test_workers_and_restarts_reuse_all_pages_without_extending_ttl(cache_databa
     # A worker which already read the old index sees the replacement too.
     assert second_worker.load_index() == refreshed
     assert second_client.page_calls == [None, "last"]
+    with second_factory() as session:
+        assert {counter.metric: counter.count for counter in session.query(MondayUsage).filter_by(operation=board_kind)} == {
+            "cache_misses": 2, "cache_hits": 2,
+        }
 
 
 def test_empty_board_is_a_valid_shared_snapshot(cache_database, board_kind):

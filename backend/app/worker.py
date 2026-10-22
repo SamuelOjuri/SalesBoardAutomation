@@ -33,6 +33,8 @@ from app.services.pipeline import (
 from app.services.postcode import GeminiPostcodeClient
 from app.services.monday_cooldown import SharedMondayCooldown
 from app.services.reference_cache import SharedIndexCache, reference_cache_scope
+from app.services.usage import UsageRecorder
+from app.services.webhook_intake import process_next_webhook_intake
 from app.services.worker import (
     JobLeaseError,
     claim_next_job,
@@ -121,6 +123,7 @@ def create_worker_runtime(
     monday_client = MondayClient.from_settings(
         runtime_settings,
         cooldown=SharedMondayCooldown.from_settings(runtime_settings, session_factory),
+        usage=UsageRecorder(session_factory),
     )
     gate = validate_schema_at_startup(
         monday_client.load_sales_board_schema,
@@ -183,6 +186,13 @@ def process_next_job(
     processing_time = now or utc_now()
     settings = runtime.settings
     mode = cast(ProcessingMode, settings.processing_mode)
+    if runtime.monday_client is not None and runtime.monday_client.cooldown_error(
+        now=processing_time
+    ) is not None:
+        return False
+    intake_processed = process_next_webhook_intake(
+        runtime.session_factory, runtime.monday_client, settings=settings, now=processing_time,
+    )
     with runtime.session_factory() as session:
         recovery = recover_stale_jobs(
             session,
@@ -201,14 +211,14 @@ def process_next_job(
             )
         if mode == "off":
             session.commit()
-            return False
+            return intake_processed
         # Leave due work untouched during a shared cooldown: no leases, failure
         # attempts, downloads, model calls, or preceding Monday reads to repeat.
         if runtime.monday_client is not None and runtime.monday_client.cooldown_error(
             now=processing_time
         ) is not None:
             session.commit()
-            return False
+            return intake_processed
         claim_item_ids = (
             settings.processing_allowlist_item_ids
             if mode == "allowlist"
@@ -223,7 +233,7 @@ def process_next_job(
         session.commit()
 
     if job is None:
-        return False
+        return intake_processed
 
     logger.info(
         "claimed processing job",

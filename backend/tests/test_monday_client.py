@@ -116,7 +116,9 @@ def test_intake_loader_requests_authoritative_file_membership_and_assets() -> No
         "item_ids": ["42"],
         "column_ids": [BOARD_CONTRACT.email_file_column_id],
     }
-    assert "assets" in call["json"]["query"]
+    assert "... on FileValue" in call["json"]["query"]
+    assert "... on FileAssetValue" in call["json"]["query"]
+    assert "assets {" not in call["json"]["query"]
     assert "column_values" in call["json"]["query"]
     assert "group { id title }" in call["json"]["query"]
 
@@ -271,7 +273,8 @@ def test_publication_loader_requests_revision_inputs_and_typed_values() -> None:
             BOARD_CONTRACT.accounts_relation_column_id,
         ],
     }
-    assert "assets" in call["json"]["query"]
+    assert "... on FileValue" in call["json"]["query"]
+    assert "public_url" not in call["json"]["query"]
     assert "group { id title }" in call["json"]["query"]
     assert "... on DropdownValue" in call["json"]["query"]
     assert "... on BoardRelationValue" in call["json"]["query"]
@@ -322,6 +325,8 @@ def test_extraction_fetches_input_and_live_dropdown_in_one_request() -> None:
     )
 
     assert client.load_sales_item_for_extraction("42") == (item, column)
+    assert "public_url" in session.calls[0]["json"]["query"]
+    assert "assets {" not in session.calls[0]["json"]["query"]
     assert len(session.calls) == 1
     request = session.calls[0]["json"]
     assert request["variables"] == {

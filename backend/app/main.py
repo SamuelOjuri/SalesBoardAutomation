@@ -18,6 +18,7 @@ from app.monday_client import MondayClient
 from app.publication_gate import validate_schema_at_startup
 from app.routes.monday_webhooks import router as monday_webhook_router
 from app.services.monday_cooldown import SharedMondayCooldown
+from app.services.usage import UsageRecorder
 
 
 SchemaLoader = Callable[[int], Mapping[str, Any]]
@@ -44,6 +45,7 @@ def create_app(
         runtime_monday_client = monday_client or MondayClient.from_settings(
             runtime_settings,
             cooldown=SharedMondayCooldown.from_settings(runtime_settings, session_factory),
+            usage=UsageRecorder(session_factory),
         )
         loader = schema_loader
         if loader is None:

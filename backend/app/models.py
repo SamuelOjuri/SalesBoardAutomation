@@ -89,6 +89,7 @@ class WebhookEvent(Base):
         ),
         Index("ix_webhook_events_board_item", "board_id", "item_id"),
         Index("ix_webhook_events_status_received", "status", "received_at"),
+        Index("ix_webhook_events_retry", "status", "next_retry_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -132,6 +133,9 @@ class WebhookEvent(Base):
         DateTime(timezone=True), nullable=True
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -359,6 +363,14 @@ class ProcessingAudit(Base):
     item: Mapped[ProcessingItem] = relationship(back_populates="audits")
     job: Mapped[ProcessingJob | None] = relationship(back_populates="audits")
     webhook_event: Mapped[WebhookEvent | None] = relationship(back_populates="audits")
+
+
+class MondayUsage(Base):
+    __tablename__ = "monday_usage"
+
+    operation: Mapped[str] = mapped_column(String, primary_key=True)
+    metric: Mapped[str] = mapped_column(String, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class MondayCooldown(Base):

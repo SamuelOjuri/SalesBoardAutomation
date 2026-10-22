@@ -108,6 +108,14 @@ class FakeMonday:
         self.intake_read_count += 1
         return self.item
 
+    def load_sales_item_for_matching(self, item_id: str) -> Mapping[str, Any]:
+        item = copy.deepcopy(self.load_sales_item_intake(item_id))
+        item["column_values"] += [
+            {"id": BOARD_CONTRACT.postcode_column_id, "type": "dropdown", "values": []},
+            {"id": BOARD_CONTRACT.accounts_relation_column_id, "type": "board_relation", "linked_item_ids": []},
+        ]
+        return item
+
     def load_postcode_dropdown_column(self, board_id: int) -> Mapping[str, Any]:
         assert board_id == BOARD_CONTRACT.sales_board_id
         self.schema_read_count += 1
@@ -162,10 +170,12 @@ class FakePostcodeClient:
         *,
         requester_domain: str = "acme.co.uk",
         company: str = "Acme",
+        requester_source: str = "top_level_sender",
     ) -> None:
         self.extraction_count = 0
         self.requester_domain = requester_domain
         self.company = company
+        self.requester_source = requester_source
 
     def process_pdf(self, content: bytes, filename: str) -> str:
         del content, filename
@@ -190,7 +200,7 @@ class FakePostcodeClient:
     ) -> DesignParameterExtraction:
         assert "WA4 6NL" in context
         assert requester_domain == self.requester_domain
-        assert requester_source == "top_level_sender"
+        assert requester_source == self.requester_source
         del internal_company_aliases
         self.extraction_count += 1
         return DesignParameterExtraction(
@@ -467,6 +477,40 @@ def test_shadow_pipeline_completes_without_monday_mutation(database) -> None:
         assert item.postcode_result_json["labelId"] == 115
         assert item.account_match_json["accountItemId"] == "99"
         assert monday.mutations == []
+
+
+def test_no_requester_evidence_skips_accounts_and_contacts(database):
+    content = eml_bytes(from_value="Sales <sales@taperedplus.co.uk>")
+    monday = FakeMonday(sales_item(identity(content)), content)
+    job = add_claimed_job(database, identity(content))
+    model = FakePostcodeClient(requester_domain=None, requester_source="not_found", company="Ltd")
+    accounts_client = FlakyAccountsClient(failures=100)
+    deps = dependencies(monday, model, accounts_client)
+    assert run_pipeline_job(database, job.id, worker_id="worker-a", dependencies=deps, mode="shadow", now=NOW) == "shadow_completed"
+    assert accounts_client.page_calls == 0
+
+
+def test_alias_ambiguity_without_multiple_direct_domains_skips_contacts(database):
+    content = eml_bytes()
+    monday = FakeMonday(sales_item(identity(content)), content)
+    job = add_claimed_job(database, identity(content))
+    accounts_client = FlakyAccountsClient(account_domain="other.co.uk")
+    deps = dependencies(monday, FakePostcodeClient(company="Unknown"), accounts_client)
+
+    class NoContacts:
+        def load_index(self):
+            raise AssertionError("Contacts cannot resolve alias-only ambiguity")
+
+    deps = replace(deps, contacts=NoContacts(), account_requester_domain_aliases={
+        "99": ("acme.co.uk",), "100": ("acme.co.uk",),
+    })
+    # Two eligible alias candidates, neither with the direct requester domain.
+    from app.services.accounts import AccountRecord, AccountsIndex
+    class AliasAccounts:
+        def load_index(self):
+            return AccountsIndex(tuple(AccountRecord(i, "Company " + i, True, "other.co.uk", ()) for i in ("99", "100")))
+    deps = replace(deps, accounts=AliasAccounts())
+    assert run_pipeline_job(database, job.id, worker_id="worker-a", dependencies=deps, mode="shadow", now=NOW) == "shadow_completed"
 
 
 def test_pipeline_resolves_shared_domain_by_unique_contact_email(database) -> None:
@@ -865,6 +909,10 @@ def test_processing_mode_policy(
 
 
 class PublishingMonday(FakeMonday):
+    def load_sales_item_for_matching(self, item_id: str) -> Mapping[str, Any]:
+        self.load_sales_item_intake(item_id)
+        return self.load_sales_item_for_publication(item_id)
+
     def __init__(self, item: Mapping[str, Any], content: bytes) -> None:
         super().__init__(item, content)
         self.postcode_ids: list[str] = []
@@ -975,6 +1023,8 @@ class PipelineHttpSession:
                                 "items_page": {"cursor": None, "items": [self.account]}}]}
         elif operation == "SalesItemIntake":
             data = {"items": [self.live.load_sales_item_intake("42")]}
+        elif operation == "SalesItemMatching":
+            data = {"items": [self.live.load_sales_item_for_matching("42")]}
         elif operation == "SalesItemExtraction":
             item, column = self.live.load_sales_item_for_extraction("42")
             data = {"items": [item], "boards": [{
@@ -1052,7 +1102,7 @@ def test_successful_publication_uses_six_graphql_requests_including_intake(
     assert transport.calls == [
         "SalesItemIntake",  # Webhook intake.
         "SalesItemExtraction",  # Sales snapshot and live dropdown schema.
-        "SalesItemIntake",  # Matching input check.
+        "SalesItemMatching",  # Matching input and output-state check.
         "SalesItemAndAccountPublication",  # Final validation of both snapshots.
         "ChangeSalesItemColumns",
         "SalesItemPublication",  # Authoritative post-write confirmation.

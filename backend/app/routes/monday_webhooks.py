@@ -7,7 +7,7 @@ import hmac
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 import uuid
 
@@ -19,17 +19,10 @@ from sqlalchemy.orm import Session
 from app.config import BoardContract
 from app.database import session_scope
 from app.models import WebhookEvent, WebhookEventStatus
-from app.monday_client import MondayAPIError, MondayTransientError
-from app.services.intake import (
-    IntakeContractError,
-    is_excluded_sales_group,
-    parse_sales_item_snapshot,
-    queue_sales_item_snapshot,
-)
+
 
 
 router = APIRouter(prefix="/api/monday/webhooks", tags=["monday"])
-WEBHOOK_PROCESSING_LEASE = timedelta(minutes=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,86 +118,21 @@ def monday_webhook(
         shared_secret=shared_secret_header or shared_secret_query,
     )
     normalized = normalize_webhook_payload(payload)
+    # Commit the complete accepted payload before acknowledging it. Monday
+    # reads and quota-aware retries belong to the durable intake worker.
     with session_scope(request.app.state.session_factory) as session:
-        event, claimed = _claim_event(session, payload, normalized)
-    if not claimed:
-        return {
-            "status": (
-                "in_progress"
-                if event.status == WebhookEventStatus.PROCESSING.value
-                else "duplicate"
-            ),
-            "eventId": str(event.id),
-            "idempotencyKey": event.idempotency_key,
-        }
-
-    settings = request.app.state.settings
-    ignored_reason = _ignored_reason(normalized, settings.board_contract)
-    if ignored_reason is not None:
-        _finish_event(request, event.id)
-        return _event_response(event, status="ignored", reason=ignored_reason)
-
-    try:
-        raw_item = request.app.state.monday_client.load_sales_item_intake(
-            normalized.item_id
-        )
-        snapshot = parse_sales_item_snapshot(
-            raw_item,
-            contract=settings.board_contract,
-            excluded_group_ids=settings.processing_excluded_group_ids,
-        )
-        if snapshot.board_id != str(settings.sales_board_id):
-            _finish_event(request, event.id)
-            return _event_response(event, status="ignored", reason="board_not_managed")
-        if snapshot.item_id != normalized.item_id:
-            raise IntakeContractError("Monday returned the wrong Sales item")
-        if is_excluded_sales_group(
-            snapshot.group_id,
-            settings.processing_excluded_group_ids,
-        ):
-            _finish_event(request, event.id)
-            return _event_response(event, status="ignored", reason="group_excluded")
-        if not snapshot.active:
-            _finish_event(request, event.id)
-            return _event_response(event, status="ignored", reason="item_not_active")
-        if not snapshot.email_assets:
-            _finish_event(request, event.id)
-            return _event_response(event, status="ignored", reason="no_supported_email")
-
-        with session_scope(request.app.state.session_factory) as session:
-            result = queue_sales_item_snapshot(
-                session,
-                snapshot,
-                webhook_event_id=event.id,
-                pipeline_version=settings.processing_pipeline_version,
-                excluded_group_ids=settings.processing_excluded_group_ids,
+        event, created = _claim_event(session, payload, normalized)
+        if not created:
+            response = _event_response(event, status="duplicate")
+        else:
+            reason = _ignored_reason(normalized, request.app.state.settings.board_contract)
+            if reason is not None:
+                event.status = WebhookEventStatus.PROCESSED.value
+                event.processed_at = datetime.now(timezone.utc)
+            response = _event_response(
+                event, status="ignored" if reason else "accepted", reason=reason
             )
-            event_record = session.get(WebhookEvent, event.id)
-            if event_record is None:
-                raise RuntimeError("claimed webhook event disappeared")
-            event_record.status = WebhookEventStatus.PROCESSED.value
-            event_record.processing_started_at = None
-            event_record.processed_at = datetime.now(timezone.utc)
-            event_record.error = None
-        return {
-            **_event_response(event, status=result.outcome),
-            "jobId": str(result.job.id),
-            "inputRevision": result.item.latest_input_revision,
-        }
-    except (MondayAPIError, MondayTransientError, IntakeContractError) as error:
-        _fail_event(request, event.id, error)
-        raise HTTPException(
-            status_code=503,
-            detail="Webhook intake temporarily unavailable",
-            headers={"Retry-After": "1"},
-        ) from error
-    except Exception as error:
-        _fail_event(request, event.id, error)
-        raise HTTPException(
-            status_code=503,
-            detail="Webhook intake temporarily unavailable",
-            headers={"Retry-After": "1"},
-        ) from error
+    return response
 
 
 def _verify_authorization(
@@ -263,33 +191,9 @@ def _claim_event(
     query = session.query(WebhookEvent).filter_by(
         idempotency_key=normalized.idempotency_key
     )
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        query = query.with_for_update()
     existing = query.one_or_none()
     if existing is not None:
-        now = datetime.now(timezone.utc)
-        processing_started_at = existing.processing_started_at
-        if processing_started_at is not None and processing_started_at.tzinfo is None:
-            processing_started_at = processing_started_at.replace(tzinfo=timezone.utc)
-        stale_processing = (
-            existing.status == WebhookEventStatus.PROCESSING.value
-            and (
-                processing_started_at is None
-                or processing_started_at <= now - WEBHOOK_PROCESSING_LEASE
-            )
-        )
-        if existing.status not in {
-            WebhookEventStatus.RECEIVED.value,
-            WebhookEventStatus.FAILED.value,
-        } and not stale_processing:
-            return existing, False
-        existing.status = WebhookEventStatus.PROCESSING.value
-        existing.processing_started_at = now
-        existing.processed_at = None
-        existing.error = None
-        existing.attempt_count += 1
-        existing.payload_json = payload
-        return existing, True
+        return existing, False
 
     event = WebhookEvent(
         id=uuid.uuid4(),
@@ -304,9 +208,8 @@ def _claim_event(
         column_id=normalized.column_id,
         payload_json=payload,
         authenticated=True,
-        status=WebhookEventStatus.PROCESSING.value,
-        processing_started_at=datetime.now(timezone.utc),
-        attempt_count=1,
+        status=WebhookEventStatus.RECEIVED.value,
+        attempt_count=0,
     )
     try:
         with session.begin_nested():
@@ -330,28 +233,6 @@ def _ignored_reason(
     if normalized.item_id is None:
         return "missing_item_id"
     return None
-
-
-def _finish_event(request: Request, event_id: uuid.UUID) -> None:
-    with session_scope(request.app.state.session_factory) as session:
-        event = session.get(WebhookEvent, event_id)
-        if event is None:
-            raise RuntimeError("claimed webhook event disappeared")
-        event.status = WebhookEventStatus.PROCESSED.value
-        event.processing_started_at = None
-        event.processed_at = datetime.now(timezone.utc)
-        event.error = None
-
-
-def _fail_event(request: Request, event_id: uuid.UUID, error: Exception) -> None:
-    with session_scope(request.app.state.session_factory) as session:
-        event = session.get(WebhookEvent, event_id)
-        if event is None:
-            return
-        event.status = WebhookEventStatus.FAILED.value
-        event.processing_started_at = None
-        event.processed_at = datetime.now(timezone.utc)
-        event.error = str(error)[:2000]
 
 
 def _event_response(

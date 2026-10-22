@@ -410,6 +410,7 @@ Operator commands use the same queue and identity checks:
 $env:PYTHONPATH = "backend"
 python -m app.operator enqueue 1234567890
 python -m app.operator retry 00000000-0000-0000-0000-000000000000
+python -m app.operator retry-webhook 00000000-0000-0000-0000-000000000000
 python -m app.operator reconcile 1234567890
 python -m app.operator reconcile 1234567890 --force-reprocess
 python -m app.operator metrics
@@ -488,3 +489,42 @@ honor the shared deadlines. To exercise cooldown persistence and concurrent
 updates against PostgreSQL, set `MONDAY_COOLDOWN_TEST_DATABASE_URL` to a disposable
 test database and run `python -m pytest -q backend/tests/test_monday_cooldown.py`.
 These tests create and remove isolated schemas; otherwise they use SQLite.
+
+Before deploying durable webhook intake, run `python -m alembic upgrade head`.
+Migration `0005_durable_webhook_intake` adds webhook retry deadlines and shared
+Monday usage counters. Deploy the API and workers together. The endpoint now
+returns `accepted` after committing the authenticated payload; job IDs and input
+revisions become available after worker intake. The worker must run even when
+processing mode is `off` to drain notifications into the processing queue.
+The migration requeues legacy failed webhook intake that previously depended
+on Monday redelivery.
+
+Each intake transaction coalesces pending events for one item before a single
+metadata read, queues work and records each event's audit atomically. PostgreSQL
+row and item advisory locks prevent concurrent snapshot fetches for that item.
+Notifications arriving during a fetch remain pending. A crash rolls back the
+transaction so another worker can recover it. Retryable failures use worker
+backoff and Monday's deadline, whichever is later; quota deferrals do not spend
+the three-attempt failure budget. Terminal events remain stored and can be
+retried with `retry-webhook` after resolving the underlying failure.
+
+`operator metrics` includes cumulative `mondayUsage` counters shared across API
+and worker processes: requests, successes, failures, retryable failures,
+cooldown skips, scheduled retries and reference-cache hits/misses. These count
+application requests, not Monday's weighted quota units or account-wide usage.
+Counters require the migration; HTTP metrics also emit payload-free
+`monday_usage` logs and persistence failure does not repeat a successful request.
+`webhookEventsByStatus` includes retained failures; a failed event with a
+`next_retry_at` deadline is awaiting retry.
+
+Only extraction requests download URLs. Later reads use typed `FileValue`
+metadata scoped to Email File, retaining asset ID, filename, size, creation time
+and membership checks. Required fields were verified by schema introspection
+against API version `2026-07`. Matching supplies a relation-state hint to preserve
+the combined Sales/Account read for empty relations; fresh publication snapshots
+decide the outcome and a cleared relation triggers fresh combined validation.
+
+The PostgreSQL intake concurrency and crash-recovery tests use the same
+disposable `REFERENCE_CACHE_TEST_DATABASE_URL` setting:
+`python -m pytest -q backend/tests/test_webhook_intake_postgres.py`.
+Without that setting they are skipped; the regular intake tests use SQLite.

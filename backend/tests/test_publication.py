@@ -185,6 +185,7 @@ def test_publishes_only_empty_columns_and_confirms_with_post_read() -> None:
         postcode_label_id=115,
         account_item_id="1953164969",
         accounts=accounts,
+        account_relation_populated=False,
     )
 
     assert result.mutation_attempted is True
@@ -229,6 +230,52 @@ def test_existing_values_are_reported_and_never_overwritten() -> None:
     assert client.mutations == []
 
 
+def test_populated_relation_skips_account_read_and_validation():
+    class PreserveClient(FakePublicationClient):
+        def load_sales_item_and_account_for_publication(self, *args):
+            raise AssertionError("unnecessary Account read")
+
+    client = PreserveClient([_sales_item(postcode_ids=(115,), account_ids=("99",))])
+    accounts = FakeAccounts(None)
+    result = publish_sales_item(
+        client=client, publication_gate=_enabled_gate(), item_id="42",
+        input_revision=INPUT_REVISION, postcode_label_id=115,
+        account_item_id="1953164969", accounts=accounts,
+        account_relation_populated=True,
+    )
+    assert result.accounts.outcome == "preserved_existing"
+    assert accounts.calls == []
+    assert client.reads == ["42"]
+
+
+def test_relation_cleared_after_matching_requires_fresh_combined_validation():
+    client = FakePublicationClient([
+        _sales_item(), _sales_item(),
+        _sales_item(account_ids=("1953164969",)),
+    ])
+    accounts = FakeAccounts(_account())
+    result = publish_sales_item(
+        client=client, publication_gate=_enabled_gate(), item_id="42",
+        input_revision=INPUT_REVISION, account_item_id="1953164969", accounts=accounts,
+        account_relation_populated=True,
+    )
+    assert result.accounts.outcome == "published"
+    assert accounts.calls == ["1953164969"]
+    assert len(client.reads) == 3
+
+
+def test_relation_filled_after_matching_skips_candidate_validation():
+    client = FakePublicationClient([_sales_item(account_ids=("99",))])
+    accounts = FakeAccounts(None)
+    result = publish_sales_item(
+        client=client, publication_gate=_enabled_gate(), item_id="42",
+        input_revision=INPUT_REVISION, account_item_id="1953164969", accounts=accounts,
+        account_relation_populated=False,
+    )
+    assert result.accounts.outcome == "preserved_existing"
+    assert accounts.calls == []
+
+
 def test_missing_postcode_never_clears_an_existing_value() -> None:
     client = FakePublicationClient([_sales_item(postcode_ids=(115,))])
 
@@ -259,6 +306,7 @@ def test_ineligible_account_does_not_block_postcode_publication() -> None:
         postcode_label_id=115,
         account_item_id="1953164969",
         accounts=FakeAccounts(None),
+        account_relation_populated=False,
     )
 
     assert result.postcode.outcome == "published"

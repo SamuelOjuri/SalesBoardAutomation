@@ -26,9 +26,11 @@ from app.models import (
 from app.publication_gate import PublicationGate
 from app.services.accounts import (
     AccountMatchResult,
+    AccountsIndex,
     AccountsIndexService,
     ContactsIndexService,
     match_account,
+    normalize_account_name,
 )
 from app.services.email_parser import ParsedEmail, process_email_content
 from app.services.intake import (
@@ -51,6 +53,7 @@ from app.services.publication import (
     SalesPublicationClient,
     StalePublicationError,
     publish_sales_item,
+    parse_sales_publication_snapshot,
 )
 from app.services.requester_identity import (
     RequesterIdentity,
@@ -71,6 +74,8 @@ class PipelineExecutionDisabled(RuntimeError):
 
 
 class PipelineMondayClient(AssetDownloader, SalesPublicationClient, Protocol):
+    def load_sales_item_for_matching(self, item_id: str) -> Mapping[str, Any]: ...
+
     def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]: ...
 
     def load_sales_item_for_extraction(
@@ -456,9 +461,10 @@ def _run_matching_stage(
     now: datetime,
 ) -> bool:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(
-        dependencies.monday,
-        job.item_id,
+    raw_item = dependencies.monday.load_sales_item_for_matching(job.item_id)
+    snapshot = parse_sales_item_snapshot(
+        raw_item,
+        contract=BOARD_CONTRACT,
         require_download_urls=False,
         excluded_group_ids=dependencies.excluded_group_ids,
     )
@@ -478,7 +484,11 @@ def _run_matching_stage(
         return False
     result = _current_result(job, ProcessingJobStage.EXTRACTING.value)
     requester = _requester_from_payload(result.get("requester"))
-    accounts_index = dependencies.accounts.load_index()
+    accounts_index = (
+        dependencies.accounts.load_index()
+        if requester.domain is not None or normalize_account_name(requester.company) is not None
+        else AccountsIndex(())
+    )
     account_match = match_account(
         accounts_index,
         requester,
@@ -487,7 +497,9 @@ def _run_matching_stage(
     )
     if (
         account_match.account is None
-        and len(account_match.domain_candidate_ids) > 1
+        and sum(account.email_domain == requester.domain
+                for account in accounts_index.eligible_accounts
+                if requester.domain is not None) > 1
         and requester.email_address_sha256 is not None
     ):
         account_match = match_account(
@@ -516,6 +528,9 @@ def _run_matching_stage(
         )
         account_payload = _account_payload(account_match)
         checkpoint["account"] = account_payload
+        checkpoint["accountRelationPopulated"] = bool(
+            parse_sales_publication_snapshot(raw_item).linked_account_item_ids
+        )
         checkpoint["completedStage"] = ProcessingJobStage.MATCHING_ACCOUNT.value
         current.result_json = checkpoint
         current.stage = ProcessingJobStage.VALIDATING.value
@@ -625,6 +640,7 @@ def _run_publication_stage(
             str(account_item_id) if account_item_id is not None else None
         ),
         accounts=dependencies.accounts,
+        account_relation_populated=result.get("accountRelationPopulated"),
         excluded_group_ids=dependencies.excluded_group_ids,
     )
 
@@ -757,7 +773,7 @@ def _load_snapshot(
     monday: PipelineMondayClient,
     item_id: str,
     *,
-    require_download_urls: bool = True,
+    require_download_urls: bool = False,
     excluded_group_ids: Sequence[str] = (),
 ) -> SalesItemSnapshot:
     return parse_sales_item_snapshot(

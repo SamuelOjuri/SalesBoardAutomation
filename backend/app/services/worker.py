@@ -19,6 +19,7 @@ from app.models import (
     ProcessingJobStatus,
 )
 from app.monday_errors import MondayAPIError
+from app.services.usage import record_usage
 
 
 class JobLeaseError(RuntimeError):
@@ -181,6 +182,7 @@ def retry_or_fail_job(
     deferred = retryable and upstream is not None and upstream.defer_attempt
     should_retry = retryable and (deferred or job.attempt_count < job.max_attempts)
     if should_retry:
+        record_usage(session, getattr(upstream or error, "monday_operation", "pipeline"), "retries_scheduled")
         delay = retry_delay_seconds(
             job.attempt_count,
             base_seconds=retry_base_seconds,

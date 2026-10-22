@@ -15,6 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import ReferenceIndexSnapshot
+from app.services.usage import record_usage
 
 
 IndexT = TypeVar("IndexT")
@@ -58,6 +59,7 @@ class SharedIndexCache:
             if not force_refresh:
                 snapshot = session.get(ReferenceIndexSnapshot, cache_key)
                 if self._fresh(snapshot, self._now(session), cache_ttl_seconds):
+                    record_usage(session, index_kind, "cache_hits")
                     return adapter.validate_json(
                         json.dumps(snapshot.payload_json), strict=True
                     )
@@ -68,10 +70,12 @@ class SharedIndexCache:
             if not force_refresh and self._fresh(
                 snapshot, self._now(session), cache_ttl_seconds
             ):
+                record_usage(session, index_kind, "cache_hits")
                 return adapter.validate_json(
                     json.dumps(snapshot.payload_json), strict=True
                 )
 
+            record_usage(session, index_kind, "cache_misses")
             index = fetch_index()
             snapshot.payload_json = json.loads(adapter.dump_json(index))
             snapshot.refreshed_at = self._now(session)

@@ -79,6 +79,55 @@ def test_snapshot_uses_only_supported_email_file_members() -> None:
     )
 
 
+def typed_snapshot():
+    raw = item_snapshot()
+    raw["column_values"][0]["files"] = [
+        {"__typename": "FileAssetValue", "asset_id": asset["id"], "asset": asset}
+        for asset in raw.pop("assets")
+    ]
+    return raw
+
+
+def test_typed_email_column_preserves_manifest_without_download_urls():
+    legacy = parse_sales_item_snapshot(item_snapshot(), contract=BOARD_CONTRACT)
+    raw = typed_snapshot()
+    for member in raw["column_values"][0]["files"]:
+        member["asset"].pop("public_url")
+        member["asset"].pop("url")
+    metadata = parse_sales_item_snapshot(raw, contract=BOARD_CONTRACT, require_download_urls=False)
+    assert [a.identity for a in metadata.email_assets] == [a.identity for a in legacy.email_assets]
+    assert metadata.email_assets[0].download_url is None
+
+
+@pytest.mark.parametrize("change", ["membership", "missing", "wrong_id", "duplicate"])
+def test_typed_metadata_must_agree_with_membership(change):
+    raw = typed_snapshot()
+    column = raw["column_values"][0]
+    if change == "membership":
+        column["value"] = json.dumps({"files": []})
+    elif change == "missing":
+        column["files"].pop()
+    elif change == "wrong_id":
+        column["files"][1]["asset"]["id"] = "999"
+    else:
+        column["files"].append(column["files"][1])
+    with pytest.raises(IntakeContractError):
+        parse_sales_item_snapshot(raw, contract=BOARD_CONTRACT, require_download_urls=False)
+
+
+@pytest.mark.parametrize("field,value", [("id", "99"), ("name", "replaced.eml"), ("file_size", 99), ("created_at", "2026-08-20T10:00:00Z")])
+def test_typed_metadata_detects_every_changed_identity_field(field, value):
+    before = typed_snapshot()
+    after = typed_snapshot()
+    after["column_values"][0]["files"][1]["asset"][field] = value
+    if field == "id":
+        after["column_values"][0]["files"][1]["asset_id"] = value
+        after["column_values"][0]["value"] = json.dumps({"files": [{"assetId": 10}, {"assetId": 99}]})
+    original = parse_sales_item_snapshot(before, contract=BOARD_CONTRACT)
+    changed = parse_sales_item_snapshot(after, contract=BOARD_CONTRACT, require_download_urls=False)
+    assert compute_input_revision(a.identity for a in original.email_assets) != compute_input_revision(a.identity for a in changed.email_assets)
+
+
 def test_snapshot_does_not_use_assets_outside_email_file_membership() -> None:
     raw_item = item_snapshot()
     raw_item["column_values"][0]["value"] = json.dumps({"files": []})

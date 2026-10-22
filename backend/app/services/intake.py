@@ -162,7 +162,33 @@ def parse_sales_item_snapshot(
             code="email_file_column_wrong_type",
         )
 
-    metadata_by_id = _asset_metadata_by_id(raw_item.get("assets"))
+    if "files" in email_column:
+        files = email_column["files"]
+        if not isinstance(files, list):
+            raise IntakeSnapshotUnavailable("Email File metadata is missing", code="item_assets_missing")
+        if not all(isinstance(member, Mapping) and member.get("__typename") in {
+            "FileAssetValue", "FileDocValue", "FileLinkValue", "FileAssetInvalidValue"
+        } for member in files):
+            raise IntakeContractError("Email File metadata is malformed", code="asset_metadata_malformed")
+        metadata_by_id = _asset_metadata_by_id([
+            member.get("asset")
+            for member in files
+            if isinstance(member, Mapping) and member.get("__typename") == "FileAssetValue"
+        ])
+        # Check typed membership independently of the raw column value. Never
+        # silently treat an inaccessible/deleted uploaded file as empty input.
+        typed_ids = [
+            _positive_decimal_id(member.get("asset_id"), "asset ID")
+            for member in files
+            if isinstance(member, Mapping) and member.get("__typename") == "FileAssetValue"
+        ]
+        raw_ids = [_positive_decimal_id(member.get("assetId"), "asset ID")
+                   for member in _file_members(email_column.get("value"))]
+        if len(typed_ids) != len(set(typed_ids)) or set(typed_ids) != set(metadata_by_id) or set(typed_ids) != set(raw_ids):
+            raise IntakeSnapshotUnavailable("Email File membership and metadata disagree", code="asset_membership_mismatch")
+    else:
+        # Also accept persisted/legacy snapshots in operator and replay tools.
+        metadata_by_id = _asset_metadata_by_id(raw_item.get("assets"))
     email_assets: list[EmailAsset] = []
     seen_asset_ids: set[str] = set()
     for member in _file_members(email_column.get("value")):

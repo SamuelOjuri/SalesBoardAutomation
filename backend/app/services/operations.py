@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 
@@ -20,6 +20,8 @@ from app.models import (
     ProcessingItemState,
     ProcessingJob,
     ProcessingJobStatus,
+    MondayUsage,
+    WebhookEvent,
 )
 from app.services.intake import (
     IntakeQueueResult,
@@ -53,6 +55,8 @@ class ProcessingMetrics:
     items_by_state: dict[str, int]
     oldest_runnable_age_seconds: float | None
     stale_running_jobs: int
+    monday_usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    webhook_events_by_status: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +65,8 @@ class ProcessingMetrics:
             "itemsByState": self.items_by_state,
             "oldestRunnableAgeSeconds": self.oldest_runnable_age_seconds,
             "staleRunningJobs": self.stale_running_jobs,
+            "mondayUsage": self.monday_usage,
+            "webhookEventsByStatus": self.webhook_events_by_status,
         }
 
 
@@ -334,12 +340,20 @@ def collect_processing_metrics(
         )
         .count()
     )
+    usage: dict[str, dict[str, int]] = {}
+    for counter in session.query(MondayUsage):
+        usage.setdefault(counter.operation, {})[counter.metric] = counter.count
+    webhook_statuses: dict[str, int] = {}
+    for (status,) in session.query(WebhookEvent.status):
+        webhook_statuses[status] = webhook_statuses.get(status, 0) + 1
     return ProcessingMetrics(
         jobs_by_status=jobs_by_status,
         jobs_by_stage=jobs_by_stage,
         items_by_state=items_by_state,
         oldest_runnable_age_seconds=oldest_age,
         stale_running_jobs=stale_running,
+        monday_usage=usage,
+        webhook_events_by_status=webhook_statuses,
     )
 
 
@@ -352,6 +366,7 @@ def _authoritative_snapshot(
     snapshot = parse_sales_item_snapshot(
         client.load_sales_item_intake(str(item_id)),
         contract=BOARD_CONTRACT,
+        require_download_urls=False,
         excluded_group_ids=excluded_group_ids,
     )
     if snapshot.item_id != str(item_id):

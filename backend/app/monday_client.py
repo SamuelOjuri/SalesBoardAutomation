@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from app.monday_errors import (
     response_error,
 )
 from app.services.monday_cooldown import SharedMondayCooldown
+from app.services.usage import UsageRecorder
 
 
 _ACCOUNT_ITEM_FIELDS = """
@@ -73,14 +75,23 @@ _SALES_ITEM_FIELDS = """
     state
     board { id }
     group { id title }
-    assets {
-        id
-        name
-        file_size
-        created_at
-        url
-        public_url
-    }
+"""
+
+_EMAIL_FILE_METADATA = """
+        ... on FileValue {
+            files {
+                __typename
+                ... on FileAssetValue {
+                    asset_id
+                    asset {
+                        id
+                        name
+                        file_size
+                        created_at
+                    }
+                }
+            }
+        }
 """
 
 _SALES_INTAKE_ITEM_FIELDS = _SALES_ITEM_FIELDS + """
@@ -88,14 +99,20 @@ _SALES_INTAKE_ITEM_FIELDS = _SALES_ITEM_FIELDS + """
         id
         type
         value
+""" + _EMAIL_FILE_METADATA + """
     }
 """
+
+_SALES_EXTRACTION_ITEM_FIELDS = _SALES_INTAKE_ITEM_FIELDS.replace(
+    "file_size", "file_size public_url"
+)
 
 _SALES_PUBLICATION_ITEM_FIELDS = _SALES_ITEM_FIELDS + """
     column_values(ids: $column_ids) {
         id
         type
         value
+""" + _EMAIL_FILE_METADATA + """
         ... on DropdownValue {
             values {
                 id
@@ -128,6 +145,7 @@ class MondayClient:
         session: requests.Session | None = None,
         asset_session: requests.Session | None = None,
         cooldown: SharedMondayCooldown | None = None,
+        usage: UsageRecorder | None = None,
     ) -> None:
         self._session = session or requests.Session()
         self._owns_session = session is None
@@ -137,6 +155,7 @@ class MondayClient:
         self._request_timeout_seconds = request_timeout_seconds
         self._max_attempts = max_attempts
         self._cooldown = cooldown
+        self._usage = usage or UsageRecorder()
         self._local_cooldown: MondayAPIError | None = None
         self._session.headers.update(
             {
@@ -148,7 +167,8 @@ class MondayClient:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, *, cooldown: SharedMondayCooldown | None = None
+        cls, settings: Settings, *, cooldown: SharedMondayCooldown | None = None,
+        usage: UsageRecorder | None = None,
     ) -> MondayClient:
         return cls(
             access_token=settings.monday_ingestion_access_token.get_secret_value(),
@@ -157,6 +177,7 @@ class MondayClient:
             request_timeout_seconds=settings.monday_request_timeout_seconds,
             max_attempts=settings.monday_request_max_attempts,
             cooldown=cooldown,
+            usage=usage,
         )
 
     def load_sales_board_schema(self, board_id: int) -> Mapping[str, Any]:
@@ -220,7 +241,7 @@ class MondayClient:
                 $postcode_column_ids: [String!]!
             ) {{
                 items(ids: $item_ids) {{
-                    {_SALES_INTAKE_ITEM_FIELDS}
+                    {_SALES_EXTRACTION_ITEM_FIELDS}
                 }}
                 boards(ids: $board_ids) {{
                     id
@@ -252,11 +273,17 @@ class MondayClient:
             raise MondayAPIError("Monday returned the wrong Sales board")
         return item, _postcode_dropdown_column(board)
 
+    def load_sales_item_for_matching(self, item_id: str) -> Mapping[str, Any]:
+        return self._load_sales_output_snapshot(item_id, operation="SalesItemMatching")
+
     def load_sales_item_for_publication(
         self, item_id: str
     ) -> Mapping[str, Any]:
+        return self._load_sales_output_snapshot(item_id, operation="SalesItemPublication")
+
+    def _load_sales_output_snapshot(self, item_id: str, *, operation: str) -> Mapping[str, Any]:
         query = f"""
-            query SalesItemPublication(
+            query {operation}(
                 $item_ids: [ID!]!,
                 $column_ids: [String!]!
             ) {{
@@ -649,9 +676,29 @@ class MondayClient:
     def _post_once(
         self, query: str, variables: Mapping[str, Any]
     ) -> Mapping[str, Any]:
+        match = re.search(r"\b(?:query|mutation)\s+(\w+)", query)
+        operation = match.group(1) if match else "anonymous"
+        try:
+            return self._post_measured(query, variables, operation)
+        except Exception as error:
+            error.monday_operation = operation
+            if isinstance(error, MondayCooldownError):
+                raise
+            self._usage.record(operation, "failures")
+            if (isinstance(error, MondayAPIError) and error.retryable) or isinstance(
+                error, (requests.Timeout, requests.ConnectionError)
+            ):
+                self._usage.record(operation, "retryable_failures")
+            raise
+
+    def _post_measured(
+        self, query: str, variables: Mapping[str, Any], operation: str
+    ) -> Mapping[str, Any]:
         blocked = self.cooldown_error()
         if blocked is not None:
+            self._usage.record(operation, "cooldown_skips")
             raise blocked
+        self._usage.record(operation, "requests")
         response = self._session.post(
             self._api_url,
             json={"query": query, "variables": dict(variables)},
@@ -682,6 +729,7 @@ class MondayClient:
         data = payload.get("data")
         if not isinstance(data, Mapping):
             raise MondayAPIError("Monday response did not contain GraphQL data")
+        self._usage.record(operation, "successes")
         return data
 
     def cooldown_error(self, *, now: datetime | None = None) -> MondayCooldownError | None:

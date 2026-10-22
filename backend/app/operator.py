@@ -11,6 +11,8 @@ from app.config import get_settings
 from app.database import create_database_engine, create_session_factory
 from app.monday_client import MondayClient
 from app.services.monday_cooldown import SharedMondayCooldown
+from app.services.usage import UsageRecorder
+from app.services.webhook_intake import retry_failed_webhook
 from app.services.operations import (
     collect_processing_metrics,
     enqueue_sales_item,
@@ -34,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a resumable successor for one failed job.",
     )
     retry.add_argument("job_id", type=uuid.UUID)
+    retry_webhook = commands.add_parser("retry-webhook", help="Retry one failed durable webhook intake.")
+    retry_webhook.add_argument("event_id", type=uuid.UUID)
     reconcile = commands.add_parser(
         "reconcile",
         help="Reconcile one Sales item with authoritative Monday state.",
@@ -62,6 +66,10 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
     monday_client: MondayClient | None = None
     try:
         with session_factory() as session:
+            if arguments.command == "retry-webhook":
+                event = retry_failed_webhook(session, arguments.event_id)
+                session.commit()
+                return {"outcome": "accepted", "eventId": str(event.id)}
             if arguments.command == "metrics":
                 return collect_processing_metrics(
                     session,
@@ -80,6 +88,7 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
             monday_client = MondayClient.from_settings(
                 settings,
                 cooldown=SharedMondayCooldown.from_settings(settings, session_factory),
+                usage=UsageRecorder(session_factory),
             )
             if arguments.command == "enqueue":
                 queued = enqueue_sales_item(

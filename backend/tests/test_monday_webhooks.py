@@ -20,6 +20,7 @@ from app.database import Base, create_database_engine, create_session_factory
 from app.main import create_app
 from app.models import ProcessingJob, WebhookEvent, WebhookEventStatus
 from app.monday_client import MondayClient
+from app.services.webhook_intake import process_next_webhook_intake
 
 
 class FakeMondayClient:
@@ -159,6 +160,12 @@ def shared_secret_headers() -> dict[str, str]:
     return {"X-Monday-Webhook-Secret": "shared-secret"}
 
 
+def drain_intake(engine, monday_client) -> None:
+    assert process_next_webhook_intake(
+        create_session_factory(engine), monday_client, settings=runtime_settings(),
+    )
+
+
 def test_challenge_is_echoed_without_processing(webhook_application: tuple[Any, ...]) -> None:
     application, _, monday_client = webhook_application
 
@@ -178,9 +185,14 @@ def test_repeated_delivery_creates_one_event_and_one_active_job(
     first, duplicate = post_requests(application, [request, request])
 
     assert first.status_code == 200
-    assert first.json()["status"] == "queued"
+    assert first.json()["status"] == "accepted"
     assert duplicate.status_code == 200
     assert duplicate.json()["status"] == "duplicate"
+    assert monday_client.requested_item_ids == []
+    with create_session_factory(engine)() as session:
+        assert session.query(WebhookEvent).one().status == "received"
+        assert session.query(ProcessingJob).count() == 0
+    drain_intake(engine, monday_client)
     assert monday_client.requested_item_ids == ["42"]
     session_factory = create_session_factory(engine)
     with session_factory() as session:
@@ -217,7 +229,9 @@ def test_stale_processing_event_is_reclaimed(
     )[0]
 
     assert response.status_code == 200
-    assert response.json()["status"] == "queued"
+    assert response.json()["status"] == "duplicate"
+    assert monday_client.requested_item_ids == []
+    drain_intake(engine, monday_client)
     assert monday_client.requested_item_ids == ["42"]
     with session_factory() as session:
         event = session.query(WebhookEvent).one()
@@ -243,8 +257,10 @@ def test_ineligible_authoritative_snapshot_does_not_enqueue(
     )[0]
 
     assert response.status_code == 200
-    assert response.json()["reason"] == reason
+    assert response.json()["status"] == "accepted"
+    drain_intake(engine, monday_client)
     with create_session_factory(engine)() as session:
+        assert session.query(WebhookEvent).one().error == reason
         assert session.query(ProcessingJob).count() == 0
 
 
@@ -262,12 +278,13 @@ def test_excluded_authoritative_group_does_not_enqueue(
     )[0]
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ignored"
-    assert response.json()["reason"] == "group_excluded"
+    assert response.json()["status"] == "accepted"
+    drain_intake(engine, monday_client)
     with create_session_factory(engine)() as session:
         event = session.query(WebhookEvent).one()
         assert event.authenticated is True
         assert event.status == WebhookEventStatus.PROCESSED.value
+        assert event.error == "group_excluded"
         assert session.query(ProcessingJob).count() == 0
 
 
@@ -284,12 +301,13 @@ def test_moved_authoritative_item_does_not_enqueue(
     )[0]
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ignored"
-    assert response.json()["reason"] == "board_not_managed"
+    assert response.json()["status"] == "accepted"
+    drain_intake(engine, monday_client)
     with create_session_factory(engine)() as session:
         event = session.query(WebhookEvent).one()
         assert event.authenticated is True
         assert event.status == WebhookEventStatus.PROCESSED.value
+        assert event.error == "board_not_managed"
         assert session.query(ProcessingJob).count() == 0
 
 
@@ -371,6 +389,6 @@ def test_webhook_accepts_a_valid_expiring_hs256_token(
             [(webhook_payload(), {"Authorization": authorization})],
         )[0]
         assert response.status_code == 200
-        assert response.json()["status"] == "queued"
+        assert response.json()["status"] == "accepted"
     finally:
         engine.dispose()
