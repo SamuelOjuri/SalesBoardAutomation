@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
-from app.input_revision import EmailAssetIdentity, compute_input_revision
+from app.input_revision import EmailAssetIdentity, build_input_manifest, compute_input_revision
 from app.monday_client import MondayTransientError
 from app.monday_errors import MondayRateLimitError
 from app.publication_gate import PublicationDisabledError, PublicationGate
@@ -95,6 +95,12 @@ class FakePublicationClient:
         self.reads.append(item_id)
         return self.snapshots.pop(0)
 
+    def load_sales_item_and_account_for_publication(
+        self, item_id: str, account_item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any] | None]:
+        del account_item_id
+        return self.load_sales_item_for_publication(item_id), None
+
     def change_sales_item_column_values(
         self,
         board_id: int,
@@ -111,9 +117,10 @@ class FakeAccounts:
         self.selected = selected
         self.calls: list[str] = []
 
-    def revalidate_selected_account(
-        self, item_id: str
+    def validate_selected_account_snapshot(
+        self, item_id: str, raw_item: Mapping[str, Any] | None
     ) -> AccountRecord | None:
+        del raw_item
         self.calls.append(item_id)
         return self.selected
 
@@ -418,3 +425,15 @@ def test_publication_identity_revalidation_does_not_require_download_url() -> No
     snapshot = parse_sales_publication_snapshot(raw_item)
 
     assert snapshot.input_revision == INPUT_REVISION
+
+
+def test_pre_write_validation_checks_the_full_job_manifest() -> None:
+    client = FakePublicationClient([_sales_item()])
+    manifest = build_input_manifest([ASSET])
+    manifest[0]["filename"] = "different.eml"
+    with pytest.raises(StalePublicationError, match="manifest has changed"):
+        publish_sales_item(
+            client=client, publication_gate=_enabled_gate(), item_id="42",
+            input_revision=INPUT_REVISION, input_manifest=manifest, postcode_label_id=115,
+        )
+    assert client.mutations == []

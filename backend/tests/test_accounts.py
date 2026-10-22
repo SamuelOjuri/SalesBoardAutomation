@@ -214,6 +214,39 @@ def test_selected_account_revalidation_rejects_an_item_from_another_board() -> N
         service.revalidate_selected_account("42")
 
 
+@pytest.mark.parametrize("change,outcome", [
+    ("eligible", "eligible"), ("deleted", "ineligible"),
+    ("archived", "ineligible"), ("duplicate", "ineligible"),
+    ("wrong_board", "error"), ("wrong_item", "error"),
+    ("malformed_duplicate", "error"),
+])
+def test_selected_account_batch_uses_all_checks_without_another_read(change, outcome) -> None:
+    raw = _account("42", duplicate_values=[])
+    if change == "deleted":
+        raw = None
+    elif change == "archived":
+        raw["state"] = "archived"
+    elif change == "duplicate":
+        raw["column_values"][1]["values"] = [{"id": 1}]
+    elif change == "wrong_board":
+        raw["board"]["id"] = "999"
+    elif change == "wrong_item":
+        raw["id"] = "43"
+    elif change == "malformed_duplicate":
+        raw["column_values"][1]["values"] = "invalid"
+    client = FakeAccountsClient({})
+    service = AccountsIndexService(client=client, board_id=BOARD_CONTRACT.accounts_board_id)
+
+    if outcome == "error":
+        with pytest.raises(AccountsContractError):
+            service.validate_selected_account_snapshot("42", raw)
+    else:
+        selected = service.validate_selected_account_snapshot("42", raw)
+        assert (selected is not None and selected.eligible) == (outcome == "eligible")
+    assert client.item_calls == []
+    assert client.page_calls == []
+
+
 @pytest.mark.parametrize(
     ("raw_value", "expected_ids"),
     [(None, ()), ('{"ids":[]}', ()), ('{"ids":[1]}', (1,))],

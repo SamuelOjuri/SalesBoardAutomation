@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from app.config import BOARD_CONTRACT
-from app.monday_client import MondayClient
+from app.monday_client import MondayAPIError, MondayClient
 
 
 class FakeResponse:
@@ -303,6 +303,130 @@ def test_sales_mutation_is_selective_and_not_blindly_retried() -> None:
     assert variables["board_id"] == str(BOARD_CONTRACT.sales_board_id)
     assert variables["item_id"] == "42"
     assert json.loads(variables["column_values"]) == values
+
+
+def test_extraction_fetches_input_and_live_dropdown_in_one_request() -> None:
+    item = {"id": "42", "assets": []}
+    column = {
+        "id": BOARD_CONTRACT.postcode_column_id,
+        "type": "dropdown",
+        "settings": {"labels": [{"id": 115, "label": "WA"}]},
+    }
+    session = FakeSession({"data": {
+        "items": [item],
+        "boards": [{"id": str(BOARD_CONTRACT.sales_board_id), "columns": [column]}],
+    }})
+    client = MondayClient(
+        access_token="token", api_version="2026-07",
+        session=cast(requests.Session, session),
+    )
+
+    assert client.load_sales_item_for_extraction("42") == (item, column)
+    assert len(session.calls) == 1
+    request = session.calls[0]["json"]
+    assert request["variables"] == {
+        "item_ids": ["42"],
+        "column_ids": [BOARD_CONTRACT.email_file_column_id],
+        "board_ids": [str(BOARD_CONTRACT.sales_board_id)],
+        "postcode_column_ids": [BOARD_CONTRACT.postcode_column_id],
+    }
+    assert "items(ids: $item_ids)" in request["query"]
+    assert "columns(ids: $postcode_column_ids)" in request["query"]
+    assert "settings" in request["query"]
+    # A repeat must use the live schema, without an extraction-schema cache.
+    column["settings"]["labels"] = []
+    assert client.load_sales_item_for_extraction("42")[1]["settings"]["labels"] == []
+    assert len(session.calls) == 2
+
+
+@pytest.mark.parametrize("invalid_board", [
+    None,
+    [],
+    [None],
+    [{"id": "999", "columns": []}],
+    [{"id": str(BOARD_CONTRACT.sales_board_id), "columns": []}],
+    [{"id": str(BOARD_CONTRACT.sales_board_id), "columns": [{
+        "id": BOARD_CONTRACT.postcode_column_id, "type": "text", "settings": {},
+    }]}],
+    [{"id": str(BOARD_CONTRACT.sales_board_id), "columns": [{
+        "id": BOARD_CONTRACT.postcode_column_id, "type": "dropdown", "settings": None,
+    }]}],
+])
+def test_extraction_batch_rejects_missing_or_unsafe_schema(invalid_board) -> None:
+    session = FakeSession({"data": {"items": [{"id": "42"}], "boards": invalid_board}})
+    client = MondayClient(
+        access_token="token", api_version="2026-07",
+        session=cast(requests.Session, session),
+    )
+    with pytest.raises(MondayAPIError):
+        client.load_sales_item_for_extraction("42")
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("account_items", [[], [{"id": "99"}]])
+def test_publication_batch_keeps_sales_and_account_reads_distinct(account_items) -> None:
+    item = {"id": "42"}
+    session = FakeSession({"data": {"sales_items": [item], "account_items": account_items}})
+    client = MondayClient(
+        access_token="token", api_version="2026-07",
+        session=cast(requests.Session, session),
+    )
+    assert client.load_sales_item_and_account_for_publication("42", "99") == (
+        item, account_items[0] if account_items else None,
+    )
+    assert len(session.calls) == 1
+    request = session.calls[0]["json"]
+    assert request["variables"] == {
+        "item_ids": ["42"],
+        "column_ids": [
+            BOARD_CONTRACT.email_file_column_id,
+            BOARD_CONTRACT.postcode_column_id,
+            BOARD_CONTRACT.accounts_relation_column_id,
+        ],
+        "account_item_ids": ["99"],
+        "account_column_ids": [
+            BOARD_CONTRACT.account_email_domain_column_id,
+            BOARD_CONTRACT.account_duplicate_column_id,
+        ],
+    }
+    assert "sales_items: items(ids: $item_ids)" in request["query"]
+    assert "account_items: items(ids: $account_item_ids)" in request["query"]
+    assert "column_values(ids: $account_column_ids)" in request["query"]
+    assert "linked_item_ids" in request["query"]
+    assert "... on TextValue" in request["query"]
+
+
+@pytest.mark.parametrize("field,invalid", [
+    ("sales_items", []), ("sales_items", [None]),
+    ("sales_items", [{"id": "42"}, {"id": "43"}]),
+    ("account_items", None), ("account_items", [None]),
+    ("account_items", [{"id": "99"}, {"id": "100"}]),
+])
+def test_publication_batch_fails_closed_on_malformed_results(field, invalid) -> None:
+    data = {"sales_items": [{"id": "42"}], "account_items": [{"id": "99"}]}
+    data[field] = invalid
+    session = FakeSession({"data": data})
+    client = MondayClient(
+        access_token="token", api_version="2026-07",
+        session=cast(requests.Session, session),
+    )
+    with pytest.raises(MondayAPIError):
+        client.load_sales_item_and_account_for_publication("42", "99")
+    assert len(session.calls) == 1
+
+
+def test_publication_batch_does_not_accept_partial_graphql_success() -> None:
+    session = FakeSession({
+        "data": {"sales_items": [{"id": "42"}], "account_items": None},
+        "errors": [{"message": "Account read failed", "extensions": {"code": "InternalServerError"}}],
+    })
+    client = MondayClient(
+        access_token="token", api_version="2026-07",
+        session=cast(requests.Session, session),
+    )
+    with pytest.raises(MondayAPIError):
+        client.load_sales_item_and_account_for_publication("42", "99")
+    assert len(session.calls) == 1
 
 
 def test_sales_mutation_rejects_non_allow_listed_columns_and_payloads() -> None:

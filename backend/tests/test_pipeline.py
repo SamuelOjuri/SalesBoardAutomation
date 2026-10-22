@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
 from app.input_revision import EmailAssetIdentity, build_input_manifest
+from app.monday_client import MondayClient
 from app.models import (
     ProcessingItem,
     ProcessingItemState,
@@ -116,6 +118,14 @@ class FakeMonday:
                 "labels": [{"id": 115, "label": "WA", "is_deactivated": False}]
             },
         }
+
+    def load_sales_item_for_extraction(
+        self, item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        return (
+            self.load_sales_item_intake(item_id),
+            self.load_postcode_dropdown_column(BOARD_CONTRACT.sales_board_id),
+        )
 
     def download_asset(
         self,
@@ -401,6 +411,7 @@ def dependencies(
         str, tuple[str, ...]
     ] | None = None,
 ) -> PipelineDependencies:
+    monday.accounts_client = accounts_client
     return PipelineDependencies(
         monday=monday,
         postcode_client=postcode_client,
@@ -884,6 +895,14 @@ class PublishingMonday(FakeMonday):
         ]
         return item
 
+    def load_sales_item_and_account_for_publication(
+        self, item_id: str, account_item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any] | None]:
+        return (
+            self.load_sales_item_for_publication(item_id),
+            self.accounts_client.load_account_item(account_item_id),
+        )
+
     def change_sales_item_column_values(
         self, board_id: int, item_id: str, column_values: Mapping[str, object]
     ) -> None:
@@ -932,6 +951,243 @@ def enable_publication(deps: PipelineDependencies) -> None:
         ],
     })
     assert deps.publication_gate.publication_enabled
+
+
+class PipelineHttpSession:
+    """Exercise the real client's HTTP boundary with mutable Monday state."""
+
+    def __init__(self, live: PublishingMonday) -> None:
+        self.headers: dict[str, str] = {}
+        self.calls: list[str] = []
+        self.live = live
+        self.account = EligibleAccountsClient().load_account_item("99")
+        self.mutation_error: BaseException | None = None
+        self.post_read_error: BaseException | None = None
+        self.before_publication = None
+
+    def post(self, url: str, **kwargs: Any):
+        del url
+        request = kwargs["json"]
+        operation = request["query"].split()[1].split("(")[0]
+        self.calls.append(operation)
+        if operation == "AccountsPage":
+            data = {"boards": [{"id": str(BOARD_CONTRACT.accounts_board_id),
+                                "items_page": {"cursor": None, "items": [self.account]}}]}
+        elif operation == "SalesItemIntake":
+            data = {"items": [self.live.load_sales_item_intake("42")]}
+        elif operation == "SalesItemExtraction":
+            item, column = self.live.load_sales_item_for_extraction("42")
+            data = {"items": [item], "boards": [{
+                "id": str(BOARD_CONTRACT.sales_board_id), "columns": [column],
+            }]}
+        elif operation == "SalesItemAndAccountPublication":
+            if self.before_publication is not None:
+                self.before_publication()
+            data = {
+                "sales_items": [self.live.load_sales_item_for_publication("42")],
+                "account_items": [self.account] if self.account is not None else [],
+            }
+        elif operation == "ChangeSalesItemColumns":
+            self.live.change_sales_item_column_values(
+                BOARD_CONTRACT.sales_board_id, "42",
+                json.loads(request["variables"]["column_values"]),
+            )
+            if self.mutation_error is not None:
+                raise self.mutation_error
+            data = {"change_multiple_column_values": {"id": "42"}}
+        elif operation == "SalesItemPublication":
+            if self.post_read_error is not None:
+                raise self.post_read_error
+            data = {"items": [self.live.load_sales_item_for_publication("42")]}
+        else:
+            raise AssertionError(f"unexpected GraphQL request: {operation}")
+
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"data": copy.deepcopy(data)}
+
+        return Response()
+
+
+@pytest.fixture
+def http_pipeline(database, monkeypatch):
+    content = eml_bytes()
+    live = PublishingMonday(sales_item(identity(content)), content)
+    transport = PipelineHttpSession(live)
+    monday = MondayClient(access_token="test", api_version="2026-07", session=transport)
+    monkeypatch.setattr(monday, "download_asset", live.download_asset)
+    model = FakePostcodeClient()
+    deps = replace(
+        dependencies(monday, model, monday),
+        accounts=AccountsIndexService(
+            client=monday, board_id=BOARD_CONTRACT.accounts_board_id,
+            cache_ttl_seconds=300,
+        ),
+    )
+    enable_publication(deps)
+    # Exclude reference-index refreshes, as in the analysis's nine-call baseline.
+    deps.accounts.load_index()
+    transport.calls.clear()
+    snapshot = parse_sales_item_snapshot(
+        monday.load_sales_item_intake("42"), contract=BOARD_CONTRACT,
+    )
+    with database() as session:
+        queued = queue_sales_item_snapshot(session, snapshot, pipeline_version="test-v1", now=NOW)
+        session.commit()
+        job = claim_next_job(session, worker_id="worker-a", now=NOW)
+        assert job is not None and job.id == queued.job.id
+        session.commit()
+    return job, deps, transport, model
+
+
+def test_successful_publication_uses_six_graphql_requests_including_intake(
+    database, http_pipeline,
+) -> None:
+    job, deps, transport, model = http_pipeline
+    assert run_pipeline_job(
+        database, job.id, worker_id="worker-a", dependencies=deps, mode="enabled", now=NOW,
+    ) == "completed"
+    assert transport.calls == [
+        "SalesItemIntake",  # Webhook intake.
+        "SalesItemExtraction",  # Sales snapshot and live dropdown schema.
+        "SalesItemIntake",  # Matching input check.
+        "SalesItemAndAccountPublication",  # Final validation of both snapshots.
+        "ChangeSalesItemColumns",
+        "SalesItemPublication",  # Authoritative post-write confirmation.
+    ]
+    assert transport.live.postcode_ids == ["115"]
+    assert transport.live.account_ids == ["99"]
+    assert len(transport.live.mutations) == model.extraction_count == 1
+
+
+@pytest.mark.parametrize("change", ["input", "group", "board", "inactive"])
+def test_batched_final_validation_catches_changes_after_matching(
+    database, http_pipeline, change,
+) -> None:
+    job, deps, transport, model = http_pipeline
+    deps = replace(deps, excluded_group_ids=DEFAULT_EXCLUDED_SALES_GROUP_IDS)
+
+    def change_live_sales():
+        item = transport.live.item
+        if change == "input":
+            item["assets"][0]["name"] = "changed.eml"
+        elif change == "group":
+            item["group"]["id"] = DEFAULT_EXCLUDED_SALES_GROUP_IDS[0]
+        elif change == "board":
+            item["board"]["id"] = "999"
+        else:
+            item["state"] = "archived"
+
+    transport.before_publication = change_live_sales
+    assert run_pipeline_job(
+        database, job.id, worker_id="worker-a", dependencies=deps, mode="enabled", now=NOW,
+    ) == "superseded"
+    assert model.extraction_count == 1
+    assert transport.live.mutations == []
+    with database() as session:
+        assert session.get(ProcessingJob, job.id).status == ProcessingJobStatus.CANCELLED.value
+        assert session.query(ProcessingJob).count() == (2 if change == "input" else 1)
+
+
+@pytest.mark.parametrize("stage", ["validating", "publishing"])
+@pytest.mark.parametrize("change", ["human_values", "duplicate_account", "input"])
+def test_resumed_validation_and_publication_fetch_fresh_snapshots(
+    database, http_pipeline, monkeypatch, stage, change,
+) -> None:
+    import app.services.pipeline as pipeline
+
+    job, deps, transport, model = http_pipeline
+
+    def interrupt_stage(*args, **kwargs):
+        raise requests.Timeout("worker interrupted before final validation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, f"_run_{'validation' if stage == 'validating' else 'publication'}_stage", interrupt_stage)
+        with pytest.raises(requests.Timeout):
+            run_pipeline_job(
+                database, job.id, worker_id="worker-a", dependencies=deps, mode="enabled", now=NOW,
+            )
+    with database() as session:
+        saved = session.get(ProcessingJob, job.id)
+        assert saved.stage == stage
+        retry_or_fail_job(session, job.id, worker_id="worker-a", error=requests.Timeout(), now=NOW)
+        session.commit()
+        assert claim_next_job(session, worker_id="worker-b", now=NOW + timedelta(seconds=30)) is not None
+        session.commit()
+
+    if change == "human_values":
+        transport.live.postcode_ids = ["114"]
+        transport.live.account_ids = ["777"]
+    elif change == "duplicate_account":
+        transport.account["column_values"][1]["values"] = [{"id": 1}]
+    else:
+        transport.live.item["assets"][0]["name"] = "changed.eml"
+    transport.calls.clear()
+    outcome = run_pipeline_job(
+        database, job.id, worker_id="worker-b", dependencies=deps, mode="enabled",
+        now=NOW + timedelta(seconds=30),
+    )
+
+    assert transport.calls[0] == "SalesItemAndAccountPublication"
+    assert model.extraction_count == 1
+    if change == "human_values":
+        assert outcome == "completed"
+        assert transport.live.mutations == []
+        assert transport.live.postcode_ids == ["114"]
+        assert transport.live.account_ids == ["777"]
+        assert len(transport.calls) == 1
+    elif change == "duplicate_account":
+        assert outcome == "completed"
+        assert transport.live.mutations == [{BOARD_CONTRACT.postcode_column_id: {"ids": [115]}}]
+        assert transport.calls[-1] == "SalesItemPublication"
+    else:
+        assert outcome == "superseded"
+        assert transport.live.mutations == []
+
+
+def test_ambiguous_batched_publication_still_confirms_both_fields(database, http_pipeline) -> None:
+    job, deps, transport, model = http_pipeline
+    transport.mutation_error = requests.Timeout("response lost after Monday accepted the write")
+    assert run_pipeline_job(
+        database, job.id, worker_id="worker-a", dependencies=deps, mode="enabled", now=NOW,
+    ) == "completed"
+    assert transport.calls[-2:] == ["ChangeSalesItemColumns", "SalesItemPublication"]
+    assert len(transport.live.mutations) == 1
+    with database() as session:
+        publication = session.get(ProcessingJob, job.id).result_json["publication"]
+        assert publication["mutationWasAmbiguous"] is True
+        assert publication["postcode"]["outcome"] == publication["accounts"]["outcome"] == "published"
+
+
+def test_failed_confirmation_resumes_with_fresh_batch_and_preserves_human_values(
+    database, http_pipeline,
+) -> None:
+    job, deps, transport, model = http_pipeline
+    transport.post_read_error = requests.Timeout("confirmation unavailable")
+    with pytest.raises(requests.Timeout):
+        run_pipeline_job(
+            database, job.id, worker_id="worker-a", dependencies=deps, mode="enabled", now=NOW,
+        )
+    with database() as session:
+        assert session.get(ProcessingJob, job.id).stage == ProcessingJobStage.PUBLISHING.value
+        retry_or_fail_job(session, job.id, worker_id="worker-a", error=requests.Timeout(), now=NOW)
+        session.commit()
+        assert claim_next_job(session, worker_id="worker-b", now=NOW + timedelta(seconds=30)) is not None
+        session.commit()
+    transport.live.postcode_ids = ["114"]
+    transport.live.account_ids = ["777"]
+    transport.post_read_error = None
+    transport.calls.clear()
+    assert run_pipeline_job(
+        database, job.id, worker_id="worker-b", dependencies=deps, mode="enabled",
+        now=NOW + timedelta(seconds=30),
+    ) == "completed"
+    assert transport.calls == ["SalesItemAndAccountPublication"]
+    assert len(transport.live.mutations) == model.extraction_count == 1
+    assert transport.live.postcode_ids == ["114"]
+    assert transport.live.account_ids == ["777"]
 
 
 def run_queued_enquiry(
@@ -995,7 +1251,7 @@ def test_repeated_completed_enquiry_reuses_extraction_and_preserves_human_edits(
     assert len(monday.mutations) == 1
     assert model.extraction_count == 1
     assert monday.download_count == 1
-    assert monday.intake_read_count == 5  # First extraction read is saved on repeat.
+    assert monday.intake_read_count == 3  # Extraction is reused; validation is at publication.
     assert monday.schema_read_count == 2  # Both mappings use live settings.
     assert accounts.page_calls == 2
     with database() as session:

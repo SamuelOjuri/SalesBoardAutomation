@@ -68,6 +68,46 @@ _CONTACT_ITEM_FIELDS = """
     }
 """
 
+_SALES_ITEM_FIELDS = """
+    id
+    state
+    board { id }
+    group { id title }
+    assets {
+        id
+        name
+        file_size
+        created_at
+        url
+        public_url
+    }
+"""
+
+_SALES_INTAKE_ITEM_FIELDS = _SALES_ITEM_FIELDS + """
+    column_values(ids: $column_ids) {
+        id
+        type
+        value
+    }
+"""
+
+_SALES_PUBLICATION_ITEM_FIELDS = _SALES_ITEM_FIELDS + """
+    column_values(ids: $column_ids) {
+        id
+        type
+        value
+        ... on DropdownValue {
+            values {
+                id
+                label
+            }
+        }
+        ... on BoardRelationValue {
+            linked_item_ids
+        }
+    }
+"""
+
 _SALES_PUBLICATION_COLUMN_IDS = frozenset(
     {
         BOARD_CONTRACT.postcode_column_id,
@@ -152,28 +192,12 @@ class MondayClient:
         return board
 
     def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]:
-        query = """
-            query SalesItemIntake($item_ids: [ID!]!, $column_ids: [String!]!) {
-                items(ids: $item_ids) {
-                    id
-                    state
-                    board { id }
-                    group { id title }
-                    assets {
-                        id
-                        name
-                        file_size
-                        created_at
-                        url
-                        public_url
-                    }
-                    column_values(ids: $column_ids) {
-                        id
-                        type
-                        value
-                    }
-                }
-            }
+        query = f"""
+            query SalesItemIntake($item_ids: [ID!]!, $column_ids: [String!]!) {{
+                items(ids: $item_ids) {{
+                    {_SALES_INTAKE_ITEM_FIELDS}
+                }}
+            }}
         """
         payload = self._execute(
             query,
@@ -182,51 +206,64 @@ class MondayClient:
                 "column_ids": [BOARD_CONTRACT.email_file_column_id],
             },
         )
-        items = payload.get("items")
-        if not isinstance(items, list) or len(items) != 1:
-            raise MondayAPIError("Monday returned an unexpected Sales item count")
-        item = items[0]
-        if not isinstance(item, Mapping):
-            raise MondayAPIError("Monday returned a malformed Sales item")
-        return item
+        return _sales_item(payload.get("items"))
+
+    def load_sales_item_for_extraction(
+        self, item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Fetch the extraction input and live dropdown settings in one read."""
+        query = f"""
+            query SalesItemExtraction(
+                $item_ids: [ID!]!,
+                $column_ids: [String!]!,
+                $board_ids: [ID!]!,
+                $postcode_column_ids: [String!]!
+            ) {{
+                items(ids: $item_ids) {{
+                    {_SALES_INTAKE_ITEM_FIELDS}
+                }}
+                boards(ids: $board_ids) {{
+                    id
+                    columns(ids: $postcode_column_ids) {{
+                        id
+                        type
+                        settings
+                    }}
+                }}
+            }}
+        """
+        payload = self._execute(
+            query,
+            {
+                "item_ids": [str(item_id)],
+                "column_ids": [BOARD_CONTRACT.email_file_column_id],
+                "board_ids": [str(BOARD_CONTRACT.sales_board_id)],
+                "postcode_column_ids": [BOARD_CONTRACT.postcode_column_id],
+            },
+        )
+        item = _sales_item(payload.get("items"))
+        boards = payload.get("boards")
+        if not isinstance(boards, list) or len(boards) != 1:
+            raise MondayAPIError("Monday returned an unexpected Sales board count")
+        board = boards[0]
+        if not isinstance(board, Mapping) or str(board.get("id")) != str(
+            BOARD_CONTRACT.sales_board_id
+        ):
+            raise MondayAPIError("Monday returned the wrong Sales board")
+        return item, _postcode_dropdown_column(board)
 
     def load_sales_item_for_publication(
         self, item_id: str
     ) -> Mapping[str, Any]:
-        query = """
+        query = f"""
             query SalesItemPublication(
                 $item_ids: [ID!]!,
                 $column_ids: [String!]!
-            ) {
-                items(ids: $item_ids) {
-                    id
-                    state
-                    board { id }
-                    group { id title }
-                    assets {
-                        id
-                        name
-                        file_size
-                        created_at
-                        url
-                        public_url
-                    }
-                    column_values(ids: $column_ids) {
-                        id
-                        type
-                        value
-                        ... on DropdownValue {
-                            values {
-                                id
-                                label
-                            }
-                        }
-                        ... on BoardRelationValue {
-                            linked_item_ids
-                        }
-                    }
-                }
-            }
+            ) {{
+                items(ids: $item_ids) {{
+                    {_SALES_PUBLICATION_ITEM_FIELDS}
+                }}
+            }}
         """
         payload = self._execute(
             query,
@@ -239,13 +276,50 @@ class MondayClient:
                 ],
             },
         )
-        items = payload.get("items")
-        if not isinstance(items, list) or len(items) != 1:
-            raise MondayAPIError("Monday returned an unexpected Sales item count")
-        item = items[0]
-        if not isinstance(item, Mapping):
-            raise MondayAPIError("Monday returned a malformed Sales item")
-        return item
+        return _sales_item(payload.get("items"))
+
+    def load_sales_item_and_account_for_publication(
+        self, item_id: str, account_item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any] | None]:
+        """Read both authoritative pre-write snapshots without using caches."""
+        account_fields = _ACCOUNT_ITEM_FIELDS.replace(
+            "$column_ids", "$account_column_ids"
+        )
+        query = f"""
+            query SalesItemAndAccountPublication(
+                $item_ids: [ID!]!,
+                $column_ids: [String!]!,
+                $account_item_ids: [ID!]!,
+                $account_column_ids: [String!]!
+            ) {{
+                sales_items: items(ids: $item_ids) {{
+                    {_SALES_PUBLICATION_ITEM_FIELDS}
+                }}
+                account_items: items(ids: $account_item_ids) {{
+                    {account_fields}
+                }}
+            }}
+        """
+        payload = self._execute(
+            query,
+            {
+                "item_ids": [str(item_id)],
+                "column_ids": [
+                    BOARD_CONTRACT.email_file_column_id,
+                    BOARD_CONTRACT.postcode_column_id,
+                    BOARD_CONTRACT.accounts_relation_column_id,
+                ],
+                "account_item_ids": [str(account_item_id)],
+                "account_column_ids": [
+                    BOARD_CONTRACT.account_email_domain_column_id,
+                    BOARD_CONTRACT.account_duplicate_column_id,
+                ],
+            },
+        )
+        return (
+            _sales_item(payload.get("sales_items")),
+            _account_item(payload.get("account_items")),
+        )
 
     def change_sales_item_column_values(
         self,
@@ -313,21 +387,7 @@ class MondayClient:
             raise ValueError("Accounts publication value must contain one item ID")
 
     def load_postcode_dropdown_column(self, board_id: int) -> Mapping[str, Any]:
-        board = self.load_sales_board_schema(board_id)
-        columns = board.get("columns")
-        if not isinstance(columns, list):
-            raise MondayAPIError("Monday returned malformed Sales board columns")
-        matches = [
-            column
-            for column in columns
-            if isinstance(column, Mapping)
-            and column.get("id") == BOARD_CONTRACT.postcode_column_id
-        ]
-        if len(matches) != 1 or matches[0].get("type") != "dropdown":
-            raise MondayAPIError("Monday Postcode dropdown is unavailable")
-        if not isinstance(matches[0].get("settings"), Mapping):
-            raise MondayAPIError("Monday Postcode dropdown settings are unavailable")
-        return matches[0]
+        return _postcode_dropdown_column(self.load_sales_board_schema(board_id))
 
     def load_accounts_page(
         self,
@@ -414,15 +474,7 @@ class MondayClient:
                 ],
             },
         )
-        items = payload.get("items")
-        if not isinstance(items, list) or len(items) > 1:
-            raise MondayAPIError("Monday returned an unexpected Account item count")
-        if not items:
-            return None
-        item = items[0]
-        if not isinstance(item, Mapping):
-            raise MondayAPIError("Monday returned a malformed Account item")
-        return item
+        return _account_item(payload.get("items"))
 
     def load_contacts_page(
         self,
@@ -649,6 +701,41 @@ class MondayClient:
             self._session.close()
         if self._owns_asset_session:
             self._asset_session.close()
+
+
+def _sales_item(items: object) -> Mapping[str, Any]:
+    if not isinstance(items, list) or len(items) != 1:
+        raise MondayAPIError("Monday returned an unexpected Sales item count")
+    if not isinstance(items[0], Mapping):
+        raise MondayAPIError("Monday returned a malformed Sales item")
+    return items[0]
+
+
+def _account_item(items: object) -> Mapping[str, Any] | None:
+    if not isinstance(items, list) or len(items) > 1:
+        raise MondayAPIError("Monday returned an unexpected Account item count")
+    if not items:
+        return None
+    if not isinstance(items[0], Mapping):
+        raise MondayAPIError("Monday returned a malformed Account item")
+    return items[0]
+
+
+def _postcode_dropdown_column(board: Mapping[str, Any]) -> Mapping[str, Any]:
+    columns = board.get("columns")
+    if not isinstance(columns, list):
+        raise MondayAPIError("Monday returned malformed Sales board columns")
+    matches = [
+        column
+        for column in columns
+        if isinstance(column, Mapping)
+        and column.get("id") == BOARD_CONTRACT.postcode_column_id
+    ]
+    if len(matches) != 1 or matches[0].get("type") != "dropdown":
+        raise MondayAPIError("Monday Postcode dropdown is unavailable")
+    if not isinstance(matches[0].get("settings"), Mapping):
+        raise MondayAPIError("Monday Postcode dropdown settings are unavailable")
+    return matches[0]
 
 
 def _is_single_positive_id_value(value: object, key: str) -> bool:

@@ -244,8 +244,11 @@ JSON to standard output.
 `backend/app/services/publication.py` is the Phase 6 write boundary. It
 re-fetches the Sales item with the current Email File asset metadata and typed
 `DropdownValue.values` and `BoardRelationValue.linked_item_ids`. The service
-recomputes the immutable input revision and rejects inactive, moved, or changed
-items before any mutation.
+recomputes the immutable input revision, compares the full job asset manifest,
+and rejects inactive, moved, excluded, or changed items before any mutation.
+When there is an Account candidate, its live snapshot is fetched in the same
+GraphQL request as the Sales snapshot and passes the same board, item identity,
+active-state, and Duplicate checks as a standalone selected-Account read.
 
 Postcode and Accounts are evaluated independently. Empty columns with valid
 candidates are included in one selective `change_multiple_column_values`
@@ -322,6 +325,16 @@ requires a valid HTTPS URL. Each Gemini request independently retries transient
 transport errors, HTTP 429 responses, and server errors up to three times with
 bounded jitter. A retry after an ambiguous publication remains safe because
 Phase 6 post-reads Monday and complete-value writes are idempotent.
+
+Extraction fetches the Sales input and live Postcode dropdown settings in one
+GraphQL request. For publishing jobs, the validating checkpoint defers its live
+input check to publication's authoritative pre-write read; shadow jobs retain
+their final input read before completion. No live snapshots are persisted or
+reused across stage boundaries, retries, or resumed work. The successful path
+that fills both columns uses six GraphQL requests including webhook intake,
+excluding reference-index refreshes, startup checks, and retries (previously
+nine). This request count is covered by a mocked HTTP-boundary pipeline test;
+it does not estimate account-wide quota savings.
 
 When another event or reconciliation queues unchanged Email input, the worker
 reuses extraction evidence from the latest completed job for that same Sales

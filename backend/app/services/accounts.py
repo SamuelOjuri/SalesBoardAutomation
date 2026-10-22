@@ -405,6 +405,12 @@ class AccountsIndexService:
 
     def revalidate_selected_account(self, item_id: str) -> AccountRecord | None:
         raw_item = self._client.load_account_item(str(item_id))
+        return self.validate_selected_account_snapshot(item_id, raw_item)
+
+    def validate_selected_account_snapshot(
+        self, item_id: str, raw_item: Mapping[str, Any] | None
+    ) -> AccountRecord | None:
+        """Apply selected-Account checks to a freshly fetched batched snapshot."""
         if raw_item is None:
             return None
         board = raw_item.get("board")

@@ -9,7 +9,7 @@ from typing import Any, Literal, Protocol
 import requests
 
 from app.config import BOARD_CONTRACT
-from app.input_revision import compute_input_revision
+from app.input_revision import build_input_manifest, compute_input_revision
 from app.monday_client import MondayTransientError
 from app.publication_gate import PublicationGate
 from app.services.accounts import AccountRecord
@@ -46,6 +46,10 @@ class SalesPublicationClient(Protocol):
         self, item_id: str
     ) -> Mapping[str, Any]: ...
 
+    def load_sales_item_and_account_for_publication(
+        self, item_id: str, account_item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any] | None]: ...
+
     def change_sales_item_column_values(
         self,
         board_id: int,
@@ -55,8 +59,8 @@ class SalesPublicationClient(Protocol):
 
 
 class AccountRevalidator(Protocol):
-    def revalidate_selected_account(
-        self, item_id: str
+    def validate_selected_account_snapshot(
+        self, item_id: str, raw_item: Mapping[str, Any] | None
     ) -> AccountRecord | None: ...
 
 
@@ -69,6 +73,7 @@ class SalesPublicationSnapshot:
     input_revision: str
     postcode_label_ids: tuple[str, ...]
     linked_account_item_ids: tuple[str, ...]
+    input_manifest: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +99,7 @@ def publish_sales_item(
     publication_gate: PublicationGate,
     item_id: str,
     input_revision: str,
+    input_manifest: Sequence[Mapping[str, Any]] | None = None,
     postcode_label_id: int | None = None,
     account_item_id: str | None = None,
     accounts: AccountRevalidator | None = None,
@@ -108,24 +114,35 @@ def publish_sales_item(
         else None
     )
 
-    before = _load_current_snapshot(
-        client,
-        normalized_item_id,
-        normalized_revision,
-        excluded_group_ids=excluded_group_ids,
-    )
-
     account_is_eligible = False
     if normalized_account_id is not None:
         if accounts is None:
             raise ValueError("accounts is required for an Account candidate")
-        selected_account = accounts.revalidate_selected_account(
-            normalized_account_id
+        raw_item, raw_account = client.load_sales_item_and_account_for_publication(
+            normalized_item_id, normalized_account_id
+        )
+        before = _validate_current_snapshot(
+            raw_item,
+            normalized_item_id,
+            normalized_revision,
+            input_manifest=input_manifest,
+            excluded_group_ids=excluded_group_ids,
+        )
+        selected_account = accounts.validate_selected_account_snapshot(
+            normalized_account_id, raw_account
         )
         account_is_eligible = (
             selected_account is not None
             and selected_account.item_id == normalized_account_id
             and selected_account.eligible
+        )
+    else:
+        before = _load_current_snapshot(
+            client,
+            normalized_item_id,
+            normalized_revision,
+            input_manifest=input_manifest,
+            excluded_group_ids=excluded_group_ids,
         )
 
     postcode = _decide_column(
@@ -184,6 +201,7 @@ def publish_sales_item(
         client,
         normalized_item_id,
         normalized_revision,
+        input_manifest=input_manifest,
         excluded_group_ids=excluded_group_ids,
     )
     postcode, postcode_confirmed = _reconcile_column(
@@ -269,6 +287,9 @@ def parse_sales_publication_snapshot(
             "linked_item_ids",
             None,
         ),
+        input_manifest=tuple(
+            build_input_manifest(asset.identity for asset in intake.email_assets)
+        ),
     )
 
 
@@ -277,10 +298,28 @@ def _load_current_snapshot(
     item_id: str,
     input_revision: str,
     *,
+    input_manifest: Sequence[Mapping[str, Any]] | None = None,
+    excluded_group_ids: Sequence[str] = (),
+) -> SalesPublicationSnapshot:
+    return _validate_current_snapshot(
+        client.load_sales_item_for_publication(item_id),
+        item_id,
+        input_revision,
+        input_manifest=input_manifest,
+        excluded_group_ids=excluded_group_ids,
+    )
+
+
+def _validate_current_snapshot(
+    raw_item: Mapping[str, Any],
+    item_id: str,
+    input_revision: str,
+    *,
+    input_manifest: Sequence[Mapping[str, Any]] | None = None,
     excluded_group_ids: Sequence[str] = (),
 ) -> SalesPublicationSnapshot:
     snapshot = parse_sales_publication_snapshot(
-        client.load_sales_item_for_publication(item_id),
+        raw_item,
         excluded_group_ids=excluded_group_ids,
     )
     if snapshot.item_id != item_id:
@@ -293,6 +332,8 @@ def _load_current_snapshot(
         raise StalePublicationError("Sales item belongs to an excluded group")
     if snapshot.input_revision != input_revision:
         raise StalePublicationError("Sales item input revision has changed")
+    if input_manifest is not None and snapshot.input_manifest != tuple(input_manifest):
+        raise StalePublicationError("Sales item input manifest has changed")
     return snapshot
 
 

@@ -73,6 +73,10 @@ class PipelineExecutionDisabled(RuntimeError):
 class PipelineMondayClient(AssetDownloader, SalesPublicationClient, Protocol):
     def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]: ...
 
+    def load_sales_item_for_extraction(
+        self, item_id: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]: ...
+
     def load_postcode_dropdown_column(
         self, board_id: int
     ) -> Mapping[str, Any]: ...
@@ -235,9 +239,12 @@ def _run_extraction_stage(
         )
         # Matching re-fetches the authoritative input before using this result.
     else:
-        snapshot = _load_snapshot(
-            dependencies.monday,
-            job.item_id,
+        raw_item, postcode_column = dependencies.monday.load_sales_item_for_extraction(
+            job.item_id
+        )
+        snapshot = parse_sales_item_snapshot(
+            raw_item,
+            contract=BOARD_CONTRACT,
             excluded_group_ids=dependencies.excluded_group_ids,
         )
         if not _snapshot_matches_job(
@@ -255,9 +262,6 @@ def _run_extraction_stage(
             )
             return False
 
-        postcode_column = dependencies.monday.load_postcode_dropdown_column(
-            BOARD_CONTRACT.sales_board_id
-        )
         with download_email_assets(dependencies.monday, snapshot.email_assets) as assets:
             requester = _extract_requester(
                 assets,
@@ -533,26 +537,30 @@ def _run_validation_stage(
     now: datetime,
 ) -> Literal["publishing", "shadow_completed", "superseded"]:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(
-        dependencies.monday,
-        job.item_id,
-        require_download_urls=False,
-        excluded_group_ids=dependencies.excluded_group_ids,
-    )
-    if not _snapshot_matches_job(
-        snapshot,
-        job,
-        dependencies.excluded_group_ids,
-    ):
-        _replace_with_snapshot(
-            session_factory,
-            job_id,
-            worker_id=worker_id,
-            snapshot=snapshot,
+    # Publication validates fresh Sales/Account snapshots immediately before
+    # writing, including on retries and resumes. Shadow runs end here and still
+    # need their own authoritative input check.
+    if not publish:
+        snapshot = _load_snapshot(
+            dependencies.monday,
+            job.item_id,
+            require_download_urls=False,
             excluded_group_ids=dependencies.excluded_group_ids,
-            now=now,
         )
-        return "superseded"
+        if not _snapshot_matches_job(
+            snapshot,
+            job,
+            dependencies.excluded_group_ids,
+        ):
+            _replace_with_snapshot(
+                session_factory,
+                job_id,
+                worker_id=worker_id,
+                snapshot=snapshot,
+                excluded_group_ids=dependencies.excluded_group_ids,
+                now=now,
+            )
+            return "superseded"
 
     with session_factory() as session:
         current = lock_owned_job(session, job_id, worker_id=worker_id)
@@ -611,6 +619,7 @@ def _run_publication_stage(
         publication_gate=dependencies.publication_gate,
         item_id=job.item_id,
         input_revision=job.input_revision,
+        input_manifest=job.input_manifest_json,
         postcode_label_id=_optional_int(postcode.get("labelId")),
         account_item_id=(
             str(account_item_id) if account_item_id is not None else None
