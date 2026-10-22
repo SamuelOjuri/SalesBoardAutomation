@@ -31,11 +31,13 @@ from app.services.pipeline import (
     run_pipeline_job,
 )
 from app.services.postcode import GeminiPostcodeClient
+from app.services.monday_cooldown import SharedMondayCooldown
 from app.services.reference_cache import SharedIndexCache, reference_cache_scope
 from app.services.worker import (
     JobLeaseError,
     claim_next_job,
     heartbeat_job,
+    monday_failure,
     recover_stale_jobs,
     retry_or_fail_job,
     safe_error_details,
@@ -116,7 +118,10 @@ def create_worker_runtime(
     runtime_settings = settings or get_settings()
     engine = create_database_engine(runtime_settings.database_url)
     session_factory = create_session_factory(engine)
-    monday_client = MondayClient.from_settings(runtime_settings)
+    monday_client = MondayClient.from_settings(
+        runtime_settings,
+        cooldown=SharedMondayCooldown.from_settings(runtime_settings, session_factory),
+    )
     gate = validate_schema_at_startup(
         monday_client.load_sales_board_schema,
         contract=runtime_settings.board_contract,
@@ -195,6 +200,13 @@ def process_next_job(
                 },
             )
         if mode == "off":
+            session.commit()
+            return False
+        # Leave due work untouched during a shared cooldown: no leases, failure
+        # attempts, downloads, model calls, or preceding Monday reads to repeat.
+        if runtime.monday_client is not None and runtime.monday_client.cooldown_error(
+            now=processing_time
+        ) is not None:
             session.commit()
             return False
         claim_item_ids = (
@@ -300,6 +312,9 @@ def process_next_job(
 def _error_is_retryable(error: BaseException) -> bool:
     if isinstance(error, PipelineExecutionDisabled):
         return False
+    upstream = monday_failure(error)
+    if upstream is not None:
+        return upstream.retryable
     explicit = getattr(error, "retryable", None)
     if isinstance(explicit, bool):
         return explicit

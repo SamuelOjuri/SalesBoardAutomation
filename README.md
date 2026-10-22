@@ -273,6 +273,37 @@ only schema creation path; application startup never creates tables.
 with PostgreSQL row locks and `SKIP LOCKED`, records lease ownership, sends
 heartbeats from short independent transactions, and recovers expired leases.
 Failures retain the last completed stage and use capped exponential retry.
+Monday GraphQL calls make one HTTP attempt per worker attempt. Structured Monday
+errors preserve their codes, HTTP status, request ID, and retry deadline without
+logging response messages or inputs. Authentication, permission, invalid query,
+and per-query complexity failures stop immediately; temporary platform and
+server failures use the worker's bounded retry budget. Unknown GraphQL errors
+also stop for investigation rather than repeatedly spending quota.
+
+`Retry-After` (seconds or an HTTP date) and `retry_in_seconds` in Monday's error
+metadata set the earliest retry time. The longest valid hint wins, even when it
+exceeds the worker's backoff maximum. Missing hints default to 60 seconds for
+limits and 30 seconds for temporary server/platform failures. Daily exhaustion
+waits at least until midnight UTC, or longer when Monday asks for it, following
+Monday's [error handling](https://developer.monday.com/api-reference/docs/error-handling)
+and [rate limit guidance](https://developer.monday.com/api-reference/docs/rate-limits).
+
+The API service, workers, and operator commands share durable cooldowns for the
+same API endpoint and credential, including across API versions and restarts.
+Workers leave due jobs unclaimed while a cooldown is active. Capacity failures
+encountered during running work release the lease and defer the same checkpoint
+without consuming a failure attempt, including on the last allowed attempt.
+Concurrent cooldown updates can only extend the deadline. Already-running HTTP
+requests may finish after another worker records a cooldown; every subsequent
+GraphQL call checks it before sending.
+
+Publication still checks authoritative input and existing values before writing.
+An uncertain mutation with a cooldown resumes from the publishing checkpoint
+after the deadline and reads live values before another write. Transport failures
+without a cooldown retain immediate post-write confirmation. Asset HTTP limits
+also respect retry deadlines; `MONDAY_REQUEST_MAX_ATTEMPTS` now controls only
+asset transport and integrity retries. Gemini's retry policy is unchanged.
+
 Failure logs include the persisted stage, attempt count, outcome, exception
 type, safe reason code, and root-cause type. The same non-sensitive metadata is
 stored on `worker_failure` audits; exception messages, email content, and model
@@ -436,3 +467,11 @@ The shared-cache tests also run against PostgreSQL when
 `python -m pytest -q backend/tests/test_reference_cache.py`. Each test creates
 and removes its own randomly named schema. Without that variable, these tests
 use SQLite to check persistence and serialized refreshes locally.
+
+Before deploying the retry changes, run `python -m alembic upgrade head` with
+`DATABASE_URL` set. Migration `0004_monday_cooldowns` adds the shared cooldown
+table. Deploy the updated API service and workers together so all processes
+honor the shared deadlines. To exercise cooldown persistence and concurrent
+updates against PostgreSQL, set `MONDAY_COOLDOWN_TEST_DATABASE_URL` to a disposable
+test database and run `python -m pytest -q backend/tests/test_monday_cooldown.py`.
+These tests create and remove isolated schemas; otherwise they use SQLite.

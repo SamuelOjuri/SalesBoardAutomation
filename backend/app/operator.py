@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from app.config import get_settings
 from app.database import create_database_engine, create_session_factory
 from app.monday_client import MondayClient
+from app.services.monday_cooldown import SharedMondayCooldown
 from app.services.operations import (
     collect_processing_metrics,
     enqueue_sales_item,
@@ -76,7 +77,10 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
                     "stage": job.stage,
                 }
 
-            monday_client = MondayClient.from_settings(settings)
+            monday_client = MondayClient.from_settings(
+                settings,
+                cooldown=SharedMondayCooldown.from_settings(settings, session_factory),
+            )
             if arguments.command == "enqueue":
                 queued = enqueue_sales_item(
                     session,

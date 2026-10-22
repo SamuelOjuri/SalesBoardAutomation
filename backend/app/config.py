@@ -226,6 +226,7 @@ class Settings(BaseSettings):
     monday_api_url: str = "https://api.monday.com/v2"
     monday_api_version: str = "2026-07"
     monday_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    # Asset transport/integrity retries only; durable jobs own GraphQL retries.
     monday_request_max_attempts: int = Field(default=3, ge=1, le=10)
 
     gemini_api_key: SecretStr

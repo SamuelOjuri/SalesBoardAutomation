@@ -3,6 +3,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
 from app import operator
 from app.config import BOARD_CONTRACT
@@ -20,6 +21,8 @@ def test_operator_passes_force_reprocess_to_durable_queue(
     Base.metadata.create_all(engine)
     monkeypatch.setattr(operator, "get_settings", lambda: SimpleNamespace(
         database_url=database_url,
+        monday_api_url="https://api.monday.com/v2",
+        monday_ingestion_access_token=SecretStr("test-token"),
         processing_pipeline_version="test-v1",
         processing_excluded_group_ids=[],
     ))
@@ -49,7 +52,7 @@ def test_operator_passes_force_reprocess_to_durable_queue(
             self.closed = True
 
     monday = Monday()
-    monkeypatch.setattr(operator.MondayClient, "from_settings", lambda _: monday)
+    monkeypatch.setattr(operator.MondayClient, "from_settings", lambda _, **kwargs: monday)
     arguments = [command, "42"] + (["--force-reprocess"] if force_reprocess else [])
     try:
         result = operator.run_command(operator.build_parser().parse_args(arguments))

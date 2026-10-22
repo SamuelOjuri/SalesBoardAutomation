@@ -17,6 +17,7 @@ from app.database import create_database_engine, create_session_factory
 from app.monday_client import MondayClient
 from app.publication_gate import validate_schema_at_startup
 from app.routes.monday_webhooks import router as monday_webhook_router
+from app.services.monday_cooldown import SharedMondayCooldown
 
 
 SchemaLoader = Callable[[int], Mapping[str, Any]]
@@ -39,8 +40,10 @@ def create_app(
     async def lifespan(application: FastAPI):
         runtime_settings = settings or get_settings()
         database_engine = engine or create_database_engine(runtime_settings.database_url)
+        session_factory = create_session_factory(database_engine)
         runtime_monday_client = monday_client or MondayClient.from_settings(
-            runtime_settings
+            runtime_settings,
+            cooldown=SharedMondayCooldown.from_settings(runtime_settings, session_factory),
         )
         loader = schema_loader
         if loader is None:
@@ -48,7 +51,7 @@ def create_app(
 
         application.state.settings = runtime_settings
         application.state.database_engine = database_engine
-        application.state.session_factory = create_session_factory(database_engine)
+        application.state.session_factory = session_factory
         application.state.monday_client = runtime_monday_client
         application.state.publication_gate = await run_in_threadpool(
             partial(

@@ -1,6 +1,6 @@
 import json
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.input_revision import EmailAssetIdentity, compute_input_revision
 from app.monday_client import MondayTransientError
+from app.monday_errors import MondayRateLimitError
 from app.publication_gate import PublicationDisabledError, PublicationGate
 from app.services.accounts import AccountRecord
 from app.services.publication import (
@@ -333,6 +334,34 @@ def test_disabled_schema_gate_blocks_the_mutation() -> None:
         )
 
     assert client.mutations == []
+
+
+@pytest.mark.parametrize("error_class", [MondayTransientError, MondayRateLimitError])
+@pytest.mark.parametrize("current_label,expected", [(115, "already_set"), (1, "preserved_existing")])
+def test_server_cooldown_defers_confirmation_and_resume_preserves_live_values(
+    error_class, current_label, expected,
+) -> None:
+    error = error_class("safe", retry_at=datetime.now(timezone.utc) + timedelta(minutes=2))
+    client = FakePublicationClient(
+        [_sales_item(), _sales_item(postcode_ids=(current_label,))], mutation_error=error,
+    )
+    with pytest.raises(error_class) as captured:
+        publish_sales_item(
+            client=client, publication_gate=_enabled_gate(), item_id="42",
+            input_revision=INPUT_REVISION, postcode_label_id=115,
+        )
+    assert captured.value is error
+    assert client.reads == ["42"]
+    assert len(client.mutations) == 1
+    # Resume at publishing after the deadline: re-read before any further write.
+    result = publish_sales_item(
+        client=client, publication_gate=_enabled_gate(), item_id="42",
+        input_revision=INPUT_REVISION, postcode_label_id=115,
+    )
+    assert result.postcode.outcome == expected
+    assert not result.mutation_attempted
+    assert len(client.mutations) == 1
+    assert client.reads == ["42", "42"]
 
 
 def test_ambiguous_mutation_is_accepted_only_when_post_read_confirms_it() -> None:

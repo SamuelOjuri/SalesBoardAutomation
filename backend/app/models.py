@@ -361,6 +361,17 @@ class ProcessingAudit(Base):
     webhook_event: Mapped[WebhookEvent | None] = relationship(back_populates="audits")
 
 
+class MondayCooldown(Base):
+    """Shared retry deadline, independent of job and reference-cache transactions."""
+
+    __tablename__ = "monday_cooldowns"
+
+    source_scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    error_code: Mapped[str] = mapped_column(String, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class ReferenceIndexSnapshot(Base):
     """An atomically refreshed, complete Accounts or Contacts board index."""
 

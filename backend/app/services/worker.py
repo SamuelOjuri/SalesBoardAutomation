@@ -18,6 +18,7 @@ from app.models import (
     ProcessingJob,
     ProcessingJobStatus,
 )
+from app.monday_errors import MondayAPIError
 
 
 class JobLeaseError(RuntimeError):
@@ -174,13 +175,22 @@ def retry_or_fail_job(
     item = _locked_item(session, job)
     job.last_error = type(error).__name__
     safe_details = safe_error_details(error)
-    should_retry = retryable and job.attempt_count < job.max_attempts
+    upstream = monday_failure(error)
+    if upstream is not None:
+        retryable = retryable and upstream.retryable
+    deferred = retryable and upstream is not None and upstream.defer_attempt
+    should_retry = retryable and (deferred or job.attempt_count < job.max_attempts)
     if should_retry:
         delay = retry_delay_seconds(
             job.attempt_count,
             base_seconds=retry_base_seconds,
             max_seconds=retry_max_seconds,
         )
+        if upstream is not None and upstream.retry_at is not None:
+            # Server deadlines are a lower bound, never capped by worker backoff.
+            delay = max(delay, (upstream.retry_at - failed_at).total_seconds())
+        if deferred:
+            job.attempt_count = max(0, job.attempt_count - 1)
         job.status = ProcessingJobStatus.RETRY_WAIT.value
         job.next_retry_at = failed_at + timedelta(seconds=delay)
         item.state = ProcessingItemState.SCHEDULED.value
@@ -191,6 +201,8 @@ def retry_or_fail_job(
             "retryDelaySeconds": delay,
             **safe_details,
         }
+        if deferred:
+            details["capacityDeferred"] = True
     else:
         job.status = ProcessingJobStatus.FAILED.value
         job.completed_at = failed_at
@@ -225,12 +237,19 @@ def safe_error_details(error: BaseException) -> dict[str, str]:
             break
         if (
             isinstance(raw_code, str)
-            and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", raw_code)
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", raw_code)
             is not None
         ):
             details["errorCode"] = raw_code
             break
     return details
+
+
+def monday_failure(error: BaseException) -> MondayAPIError | None:
+    return next(
+        (candidate for candidate in _error_chain(error) if isinstance(candidate, MondayAPIError)),
+        None,
+    )
 
 
 def _error_chain(error: BaseException) -> tuple[BaseException, ...]:

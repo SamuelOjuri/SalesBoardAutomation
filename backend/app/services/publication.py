@@ -174,6 +174,10 @@ def publish_sales_item(
         requests.Timeout,
         MondayTransientError,
     ) as error:
+        if isinstance(error, MondayTransientError) and error.retry_at is not None:
+            # Confirmation must wait for capacity too. The durable publishing
+            # checkpoint resumes with an authoritative read before any write.
+            raise
         mutation_error = error
 
     after = _load_current_snapshot(

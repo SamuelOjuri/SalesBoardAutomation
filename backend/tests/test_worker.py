@@ -30,6 +30,9 @@ from app.models import (
 )
 from app.services.email_parser import AttachmentExtractionError
 from app.services.intake import IntakeContractError, IntakeSnapshotUnavailable
+from app.monday_client import MondayClient
+from app.monday_errors import MondayAPIError, MondayRateLimitError, MondayTransientError
+from app.services.monday_cooldown import SharedMondayCooldown
 from app.services.worker import (
     JobLeaseError,
     claim_next_job,
@@ -86,7 +89,7 @@ def test_worker_runtime_shares_durable_indexes(runtime, monkeypatch):
     client.load_accounts_page.return_value = {"cursor": None, "items": []}
     client.load_contacts_page.return_value = {"cursor": None, "items": []}
     monkeypatch.setattr("app.worker.create_database_engine", lambda url: runtime.engine)
-    monkeypatch.setattr("app.worker.MondayClient.from_settings", lambda settings: client)
+    monkeypatch.setattr("app.worker.MondayClient.from_settings", lambda settings, **kwargs: client)
     monkeypatch.setattr("app.worker.GeminiPostcodeClient.from_settings", lambda settings: Mock())
     monkeypatch.setattr("app.worker.validate_schema_at_startup", lambda *args, **kwargs: Mock())
 
@@ -737,3 +740,112 @@ def test_claim_can_be_restricted_to_allowlisted_items(session_factory) -> None:
 
         assert claimed is not None
         assert claimed.id == allowed.id
+
+
+@pytest.mark.parametrize("error_type,deferred", [
+    (MondayRateLimitError, True), (MondayTransientError, False),
+])
+def test_monday_deadline_is_not_capped_and_preserves_checkpoint(session_factory, error_type, deferred):
+    with session_factory() as session:
+        job = add_job(session, item_id="801", attempt_count=1)
+        claim_next_job(session, worker_id="worker-a", now=NOW)
+        job.stage = ProcessingJobStage.PUBLISHING.value
+        job.result_json = {"completedStage": "validating"}
+        error = error_type("safe", code="DAILY_LIMIT_EXCEEDED" if deferred else "http_503",
+                           retry_at=NOW + timedelta(days=1))
+        retry_or_fail_job(session, job.id, worker_id="worker-a", error=error,
+                          retry_max_seconds=5, now=NOW)
+        session.commit()
+        assert job.status == ProcessingJobStatus.RETRY_WAIT.value
+        assert job.next_retry_at == NOW + timedelta(days=1)
+        assert job.attempt_count == (1 if deferred else 2)
+        assert job.stage == ProcessingJobStage.PUBLISHING.value
+        assert job.result_json == {"completedStage": "validating"}
+        assert job.locked_by is None
+        audit = session.query(ProcessingAudit).filter_by(event_type="worker_failure").one()
+        assert audit.details_json["errorCode"] == error.code
+
+
+def test_daily_exhaustion_defers_even_on_last_attempt_then_work_can_resume(session_factory):
+    with session_factory() as session:
+        job = add_job(session, item_id="802", attempt_count=2, max_attempts=3)
+        claim_next_job(session, worker_id="worker-a", now=NOW)
+        deadline = NOW + timedelta(hours=12)
+        error = MondayRateLimitError("safe", code="DAILY_LIMIT_EXCEEDED", retry_at=deadline)
+        retry_or_fail_job(session, job.id, worker_id="worker-a", error=error, now=NOW)
+        session.commit()
+        assert job.status == ProcessingJobStatus.RETRY_WAIT.value
+        assert job.attempt_count == 2
+        assert claim_next_job(session, worker_id="worker-b", now=deadline - timedelta(seconds=1)) is None
+        resumed = claim_next_job(session, worker_id="worker-b", now=deadline)
+        assert resumed.id == job.id
+        assert resumed.attempt_count == 3
+
+
+def test_permanent_monday_failure_is_terminal_on_first_attempt(session_factory):
+    with session_factory() as session:
+        job = add_job(session, item_id="803")
+        claim_next_job(session, worker_id="worker-a", now=NOW)
+        retry_or_fail_job(session, job.id, worker_id="worker-a", now=NOW,
+                          error=MondayAPIError("safe", code="UserUnauthorizedException"))
+        assert job.status == ProcessingJobStatus.FAILED.value
+        assert job.attempt_count == 1
+        assert job.next_retry_at is None
+        assert job.locked_by is None
+
+
+def test_worker_does_not_claim_due_work_during_shared_cooldown(runtime, session_factory):
+    cooldown = SharedMondayCooldown(session_factory=session_factory, source_scope="test")
+    cooldown.record(MondayRateLimitError("safe", code="DAILY_LIMIT_EXCEEDED",
+                                       retry_at=NOW + timedelta(days=1)))
+    runtime.settings = runtime.settings.model_copy(update={"processing_mode": "shadow"})
+    runtime.monday_client = MondayClient(access_token="test", api_version="2026-07", cooldown=cooldown)
+    with session_factory.begin() as session:
+        job = add_job(session, item_id="804")
+        job_id = job.id
+    pipeline = Mock()
+    assert not process_next_job(runtime, now=NOW, pipeline_runner=pipeline)
+    pipeline.assert_not_called()
+    with session_factory() as session:
+        job = session.get(ProcessingJob, job_id)
+        assert job.attempt_count == 0
+        assert job.status == ProcessingJobStatus.SCHEDULED.value
+
+
+def test_persistently_failing_read_uses_three_http_attempts_across_worker_budget(
+    runtime, session_factory, monkeypatch,
+):
+    import requests
+    from test_monday_retries import session_with_response
+
+    clock = [NOW]
+    monkeypatch.setattr("app.services.worker.utc_now", lambda: clock[0])
+    runtime.settings = runtime.settings.model_copy(update={"processing_mode": "shadow"})
+    # An unshared test client still prevents immediate retries in its own process.
+    http = session_with_response(503, {})
+    client = MondayClient(access_token="test", api_version="2026-07", max_attempts=3,
+                          session=cast(requests.Session, http))
+    runtime.monday_client = client
+    # Set the client response/deadline clock without waiting in tests.
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    monkeypatch.setattr("app.monday_client.datetime", Clock)
+    with session_factory.begin() as session:
+        job = add_job(session, item_id="805", scheduled_for=NOW)
+        job_id = job.id
+    def failing_pipeline(*args, **kwargs):
+        client.load_sales_item_intake("805")
+    for attempt in range(3):
+        assert process_next_job(runtime, now=clock[0], pipeline_runner=failing_pipeline)
+        with session_factory() as session:
+            job = session.get(ProcessingJob, job_id)
+            assert job.attempt_count == attempt + 1
+            if attempt < 2:
+                assert job.status == ProcessingJobStatus.RETRY_WAIT.value
+                # SQLite drops timezone information.
+                clock[0] = job.next_retry_at.replace(tzinfo=timezone.utc)
+            else:
+                assert job.status == ProcessingJobStatus.FAILED.value
+    assert http.post.call_count == 3
