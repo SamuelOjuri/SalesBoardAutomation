@@ -37,7 +37,7 @@ from app.services.worker import (
     recover_stale_jobs,
     retry_or_fail_job,
 )
-from app.worker import WorkerRuntime, process_next_job, run_worker
+from app.worker import WorkerRuntime, create_worker_runtime, process_next_job, run_worker
 
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
@@ -79,6 +79,26 @@ def runtime(session_factory):
         dependencies=cast(Any, None),
         worker_id="worker-database-retry-test",
     )
+
+
+def test_worker_runtime_shares_durable_indexes(runtime, monkeypatch):
+    client = Mock()
+    client.load_accounts_page.return_value = {"cursor": None, "items": []}
+    client.load_contacts_page.return_value = {"cursor": None, "items": []}
+    monkeypatch.setattr("app.worker.create_database_engine", lambda url: runtime.engine)
+    monkeypatch.setattr("app.worker.MondayClient.from_settings", lambda settings: client)
+    monkeypatch.setattr("app.worker.GeminiPostcodeClient.from_settings", lambda settings: Mock())
+    monkeypatch.setattr("app.worker.validate_schema_at_startup", lambda *args, **kwargs: Mock())
+
+    with create_worker_runtime(runtime.settings) as first:
+        first.dependencies.accounts.load_index()
+        first.dependencies.contacts.load_index()
+        with create_worker_runtime(runtime.settings) as second:
+            second.dependencies.accounts.load_index()
+            second.dependencies.contacts.load_index()
+            # Separate runtime objects reuse snapshots with the same source key.
+            assert client.load_accounts_page.call_count == 1
+            assert client.load_contacts_page.call_count == 1
 
 
 def test_worker_retries_disconnected_recovery_with_fresh_session(

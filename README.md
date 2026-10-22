@@ -189,7 +189,16 @@ unlabelled legal links and websites in older quoted messages are ignored.
 `backend/app/services/accounts.py` loads every Accounts page through typed
 Monday column values, including the final page whose cursor is null. Only
 Duplicate label ID `1` excludes an item, while null and empty values remain
-eligible. Complete indexes are cached for five minutes. A selected Account is
+eligible. Complete indexes are cached for five minutes. Workers share durable
+PostgreSQL snapshots for both Accounts and Contacts. One worker refreshes all
+pages under a database row lock; other workers reuse its complete snapshot.
+Freshness is measured from that refresh using the database clock, so reads and
+worker restarts do not extend the five-minute window. A failed refresh rolls
+back without publishing partial data or serving an expired snapshot. Snapshots
+are isolated by board, index format, API endpoint/version, and a hash of the
+ingestion credential. Contacts snapshots contain email hashes rather than raw
+email addresses. Forced refreshes and cache clears affect all workers using the
+same snapshot. A selected Account is
 always re-fetched, must belong to the configured Accounts board, and must still
 be active and unflagged before publication.
 
@@ -414,3 +423,16 @@ python -m pytest -q
 The model tests use SQLite only as a fast local check. Release migrations and
 runtime storage target PostgreSQL, including its partial unique index and
 immutability triggers.
+
+For shared reference indexes, run `python -m alembic upgrade head` with
+`DATABASE_URL` set before deploying the updated workers. Migration
+`0003_shared_reference_indexes` adds the snapshot table; the first lookup
+populates it. Standalone Accounts exports continue to fetch a fresh complete
+board. Incremental webhook-driven reference updates remain a later step and
+would need complete reconciliation before replacing these board refreshes.
+
+The shared-cache tests also run against PostgreSQL when
+`REFERENCE_CACHE_TEST_DATABASE_URL` names a disposable test database:
+`python -m pytest -q backend/tests/test_reference_cache.py`. Each test creates
+and removes its own randomly named schema. Without that variable, these tests
+use SQLite to check persistence and serialized refreshes locally.

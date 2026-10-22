@@ -10,8 +10,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+from pydantic import TypeAdapter
+
 from app.behavioral_contract import AccountResolution, BEHAVIORAL_CONTRACT
 from app.config import BOARD_CONTRACT
+from app.services.reference_cache import SharedIndexCache
 from app.services.requester_identity import (
     RequesterIdentity,
     email_address_sha256,
@@ -121,6 +124,10 @@ class ContactsIndex:
             for contact in self.contacts
             if contact.active and contact.email_address_sha256 == value
         )
+
+
+_ACCOUNTS_INDEX_ADAPTER = TypeAdapter(AccountsIndex)
+_CONTACTS_INDEX_ADAPTER = TypeAdapter(ContactsIndex)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +357,7 @@ class AccountsIndexService:
         board_id: int,
         cache_ttl_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
+        shared_cache: SharedIndexCache | None = None,
     ) -> None:
         if board_id <= 0:
             raise ValueError("board_id must be positive")
@@ -359,11 +367,21 @@ class AccountsIndexService:
         self._board_id = board_id
         self._cache_ttl_seconds = cache_ttl_seconds
         self._clock = clock
+        self._shared_cache = shared_cache
         self._lock = threading.Lock()
         self._cached_index: AccountsIndex | None = None
         self._cache_expires_at = 0.0
 
     def load_index(self, *, force_refresh: bool = False) -> AccountsIndex:
+        if self._shared_cache is not None:
+            return self._shared_cache.load_index(
+                index_kind="accounts",
+                board_id=self._board_id,
+                cache_ttl_seconds=self._cache_ttl_seconds,
+                fetch_index=self._fetch_all_pages,
+                adapter=_ACCOUNTS_INDEX_ADAPTER,
+                force_refresh=force_refresh,
+            )
         now = self._clock()
         if (
             not force_refresh
@@ -402,6 +420,8 @@ class AccountsIndexService:
         return account if account.eligible else None
 
     def clear_cache(self) -> None:
+        if self._shared_cache is not None:
+            self._shared_cache.clear(index_kind="accounts", board_id=self._board_id)
         with self._lock:
             self._cached_index = None
             self._cache_expires_at = 0.0
@@ -451,6 +471,7 @@ class ContactsIndexService:
         board_id: int,
         cache_ttl_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
+        shared_cache: SharedIndexCache | None = None,
     ) -> None:
         if board_id <= 0:
             raise ValueError("board_id must be positive")
@@ -460,11 +481,21 @@ class ContactsIndexService:
         self._board_id = board_id
         self._cache_ttl_seconds = cache_ttl_seconds
         self._clock = clock
+        self._shared_cache = shared_cache
         self._lock = threading.Lock()
         self._cached_index: ContactsIndex | None = None
         self._cache_expires_at = 0.0
 
     def load_index(self, *, force_refresh: bool = False) -> ContactsIndex:
+        if self._shared_cache is not None:
+            return self._shared_cache.load_index(
+                index_kind="contacts",
+                board_id=self._board_id,
+                cache_ttl_seconds=self._cache_ttl_seconds,
+                fetch_index=self._fetch_all_pages,
+                adapter=_CONTACTS_INDEX_ADAPTER,
+                force_refresh=force_refresh,
+            )
         now = self._clock()
         if (
             not force_refresh
@@ -487,6 +518,8 @@ class ContactsIndexService:
             return index
 
     def clear_cache(self) -> None:
+        if self._shared_cache is not None:
+            self._shared_cache.clear(index_kind="contacts", board_id=self._board_id)
         with self._lock:
             self._cached_index = None
             self._cache_expires_at = 0.0

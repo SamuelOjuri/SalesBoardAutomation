@@ -361,6 +361,32 @@ class ProcessingAudit(Base):
     webhook_event: Mapped[WebhookEvent | None] = relationship(back_populates="audits")
 
 
+class ReferenceIndexSnapshot(Base):
+    """An atomically refreshed, complete Accounts or Contacts board index."""
+
+    __tablename__ = "reference_index_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "index_kind IN ('accounts', 'contacts')",
+            name="ck_reference_index_snapshots_kind",
+        ),
+        CheckConstraint(
+            "(payload_json IS NULL) = (refreshed_at IS NULL)",
+            name="ck_reference_index_snapshots_complete",
+        ),
+    )
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    index_kind: Mapped[str] = mapped_column(String, nullable=False)
+    board_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    refreshed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 @event.listens_for(ProcessingJob, "before_update")
 def _prevent_job_input_identity_change(
     _mapper: object, _connection: object, target: ProcessingJob

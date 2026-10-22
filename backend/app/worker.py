@@ -31,6 +31,7 @@ from app.services.pipeline import (
     run_pipeline_job,
 )
 from app.services.postcode import GeminiPostcodeClient
+from app.services.reference_cache import SharedIndexCache, reference_cache_scope
 from app.services.worker import (
     JobLeaseError,
     claim_next_job,
@@ -120,13 +121,23 @@ def create_worker_runtime(
         monday_client.load_sales_board_schema,
         contract=runtime_settings.board_contract,
     )
+    reference_cache = SharedIndexCache(
+        session_factory=session_factory,
+        source_scope=reference_cache_scope(
+            api_url=runtime_settings.monday_api_url,
+            api_version=runtime_settings.monday_api_version,
+            access_token=runtime_settings.monday_ingestion_access_token.get_secret_value(),
+        ),
+    )
     accounts = AccountsIndexService(
         client=monday_client,
         board_id=runtime_settings.accounts_board_id,
+        shared_cache=reference_cache,
     )
     contacts = ContactsIndexService(
         client=monday_client,
         board_id=runtime_settings.contacts_board_id,
+        shared_cache=reference_cache,
     )
     dependencies = PipelineDependencies(
         monday=monday_client,
