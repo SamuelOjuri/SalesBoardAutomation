@@ -38,6 +38,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reconcile one Sales item with authoritative Monday state.",
     )
     reconcile.add_argument("item_id")
+    for command in (enqueue, reconcile):
+        command.add_argument(
+            "--force-reprocess",
+            action="store_true",
+            help=(
+                "Repeat extraction instead of reusing a completed checkpoint; "
+                "requires no active job."
+            ),
+        )
     commands.add_parser(
         "metrics",
         help="Display queue, stage, item, and stale-lease metrics.",
@@ -75,6 +84,7 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
                     arguments.item_id,
                     pipeline_version=settings.processing_pipeline_version,
                     excluded_group_ids=settings.processing_excluded_group_ids,
+                    force_reprocess=arguments.force_reprocess,
                 )
                 session.commit()
                 return {
@@ -90,6 +100,7 @@ def run_command(arguments: argparse.Namespace) -> dict[str, Any]:
                     arguments.item_id,
                     pipeline_version=settings.processing_pipeline_version,
                     excluded_group_ids=settings.processing_excluded_group_ids,
+                    force_reprocess=arguments.force_reprocess,
                 )
                 session.commit()
                 return {

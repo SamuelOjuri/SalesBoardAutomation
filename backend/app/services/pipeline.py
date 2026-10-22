@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -41,6 +44,7 @@ from app.services.postcode import (
     PostcodeAnalysisResult,
     PostcodeExtractionClient,
     analyze_downloaded_email_assets,
+    resolve_postcode_label,
 )
 from app.services.publication import (
     PublicationResult,
@@ -207,43 +211,68 @@ def _run_extraction_stage(
     now: datetime,
 ) -> bool:
     job = _read_owned_job(session_factory, job_id, worker_id=worker_id)
-    snapshot = _load_snapshot(
-        dependencies.monday,
-        job.item_id,
-        excluded_group_ids=dependencies.excluded_group_ids,
-    )
-    if not _snapshot_matches_job(
-        snapshot,
+    extraction_context = _extraction_context_sha256(dependencies)
+    reusable = _completed_extraction_checkpoint(
+        session_factory,
         job,
-        dependencies.excluded_group_ids,
-    ):
-        _replace_with_snapshot(
-            session_factory,
-            job_id,
-            worker_id=worker_id,
-            snapshot=snapshot,
-            excluded_group_ids=dependencies.excluded_group_ids,
-            now=now,
-        )
-        return False
-
-    postcode_column = dependencies.monday.load_postcode_dropdown_column(
-        BOARD_CONTRACT.sales_board_id
+        extraction_context=extraction_context,
     )
-    with download_email_assets(dependencies.monday, snapshot.email_assets) as assets:
-        requester = _extract_requester(
-            assets,
-            internal_domains=dependencies.internal_email_domains,
-            domain_aliases=dependencies.requester_domain_aliases,
+    if reusable is not None:
+        source_job_id, postcode_payload, requester = reusable
+        # Cache only extraction evidence. Dropdown settings are live reference
+        # data, and an area that was previously unmapped may now be available.
+        postcode_column = dependencies.monday.load_postcode_dropdown_column(
+            BOARD_CONTRACT.sales_board_id
         )
-        postcode = analyze_downloaded_email_assets(
-            assets,
-            client=dependencies.postcode_client,
-            postcode_column=postcode_column,
-            requester=requester,
-            internal_company_aliases=dependencies.internal_company_aliases,
+        resolution = resolve_postcode_label(
+            postcode_payload["area"], postcode_column
         )
-        requester = replace(requester, company=postcode.company)
+        postcode_payload["labelId"] = resolution.label_id if resolution else None
+        postcode_payload["outcome"] = (
+            "not_found"
+            if postcode_payload["area"] is None
+            else "resolved" if resolution else "unmapped"
+        )
+        # Matching re-fetches the authoritative input before using this result.
+    else:
+        snapshot = _load_snapshot(
+            dependencies.monday,
+            job.item_id,
+            excluded_group_ids=dependencies.excluded_group_ids,
+        )
+        if not _snapshot_matches_job(
+            snapshot,
+            job,
+            dependencies.excluded_group_ids,
+        ):
+            _replace_with_snapshot(
+                session_factory,
+                job_id,
+                worker_id=worker_id,
+                snapshot=snapshot,
+                excluded_group_ids=dependencies.excluded_group_ids,
+                now=now,
+            )
+            return False
+
+        postcode_column = dependencies.monday.load_postcode_dropdown_column(
+            BOARD_CONTRACT.sales_board_id
+        )
+        with download_email_assets(dependencies.monday, snapshot.email_assets) as assets:
+            requester = _extract_requester(
+                assets,
+                internal_domains=dependencies.internal_email_domains,
+                domain_aliases=dependencies.requester_domain_aliases,
+            )
+            postcode = analyze_downloaded_email_assets(
+                assets,
+                client=dependencies.postcode_client,
+                postcode_column=postcode_column,
+                requester=requester,
+                internal_company_aliases=dependencies.internal_company_aliases,
+            )
+            requester = replace(requester, company=postcode.company)
+        postcode_payload = _postcode_payload(postcode)
 
     with session_factory() as session:
         current = lock_owned_job(session, job_id, worker_id=worker_id)
@@ -258,24 +287,160 @@ def _run_extraction_stage(
                 now=now,
             )
             return False
-        postcode_payload = _postcode_payload(postcode)
         result = _identity_payload(current)
         result.update(
             {
                 "completedStage": ProcessingJobStage.EXTRACTING.value,
+                "extractionContextSha256": extraction_context,
                 "postcode": postcode_payload,
                 "requester": _requester_payload(requester),
             }
         )
+        if reusable is not None:
+            result["reusedExtractionJobId"] = str(source_job_id)
         current.result_json = result
         current.stage = ProcessingJobStage.MATCHING_ACCOUNT.value
         current.heartbeat_at = now
         item.postcode_result_json = postcode_payload
         item.account_match_json = None
         item.state = ProcessingItemState.PROCESSING.value
-        _add_stage_audit(session, item, current, "completed")
+        _add_stage_audit(
+            session, item, current, "reused" if reusable is not None else "completed"
+        )
         session.commit()
     return True
+
+
+def _extraction_context_sha256(dependencies: PipelineDependencies) -> str:
+    """Cover runtime evidence rules that are not part of pipeline_version."""
+    context = {
+        "internalEmailDomains": sorted(dependencies.internal_email_domains),
+        "internalCompanyAliases": sorted(dependencies.internal_company_aliases),
+        "requesterDomainAliases": dict(dependencies.requester_domain_aliases),
+    }
+    return hashlib.sha256(
+        json.dumps(context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _completed_extraction_checkpoint(
+    session_factory: sessionmaker[Session],
+    job: ProcessingJob,
+    *,
+    extraction_context: str,
+) -> tuple[uuid.UUID, dict[str, Any], RequesterIdentity] | None:
+    if (
+        isinstance(job.result_json, Mapping)
+        and job.result_json.get("forceReprocess") is True
+    ):
+        return None
+    with session_factory() as session:
+        source = (
+            session.query(ProcessingJob)
+            .filter(
+                ProcessingJob.board_id == job.board_id,
+                ProcessingJob.item_id == job.item_id,
+                ProcessingJob.input_revision == job.input_revision,
+                ProcessingJob.pipeline_version == job.pipeline_version,
+                ProcessingJob.status == ProcessingJobStatus.COMPLETED.value,
+            )
+            .order_by(
+                ProcessingJob.completed_at.desc(),
+                ProcessingJob.created_at.desc(),
+                ProcessingJob.id.desc(),
+            )
+            .first()
+        )
+        if source is None or source.input_manifest_json != job.input_manifest_json:
+            return None
+        try:
+            result = source.result_json
+            if (
+                not isinstance(result, Mapping)
+                or type(result.get("schemaVersion")) is not int
+                or result.get("completedStage") not in {
+                    ProcessingJobStage.VALIDATING.value,
+                    ProcessingJobStage.PUBLISHING.value,
+                }
+            ):
+                return None
+            result = _current_result(source, result["completedStage"])
+            if result.get("extractionContextSha256") != extraction_context:
+                return None
+            postcode = _mapping(result.get("postcode"), "postcode checkpoint")
+            # Copy only the extraction fields; never carry forward a match,
+            # publication decision, raw content, or another job's control flags.
+            postcode = {
+                key: postcode[key]
+                for key in (
+                    "outcome",
+                    "area",
+                    "labelId",
+                    "assetIds",
+                    "extractedTextSha256",
+                    "company",
+                )
+            }
+            if not _valid_cached_postcode(postcode, job.input_manifest_json):
+                return None
+            postcode["assetIds"] = list(postcode["assetIds"])
+            requester_payload = _mapping(
+                result.get("requester"), "requester checkpoint"
+            )
+            if not all(
+                key in requester_payload
+                for key in (
+                    "domain", "company", "source", "websiteDomains",
+                    "emailAddressSha256",
+                )
+            ):
+                return None
+            if requester_payload["domain"] is not None and (
+                not isinstance(requester_payload["domain"], str)
+                or normalize_domain(requester_payload["domain"])
+                != requester_payload["domain"]
+            ):
+                return None
+            requester = _requester_from_payload(requester_payload)
+            if requester.source != "not_found" and requester.email_address_sha256 is None:
+                return None
+            if requester_payload["company"] != postcode["company"]:
+                return None
+            return source.id, postcode, requester
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            # Legacy or damaged checkpoints must take the full extraction path.
+            return None
+
+
+def _valid_cached_postcode(
+    postcode: Mapping[str, Any],
+    manifest: Sequence[Mapping[str, Any]],
+) -> bool:
+    area = postcode["area"]
+    label_id = postcode["labelId"]
+    outcome = postcode["outcome"]
+    if area is not None and (
+        not isinstance(area, str) or re.fullmatch(r"[A-Z]{1,2}", area) is None
+    ):
+        return False
+    if postcode["company"] is not None and not isinstance(postcode["company"], str):
+        return False
+    if postcode["assetIds"] != [entry["asset_id"] for entry in manifest]:
+        return False
+    if not isinstance(postcode["extractedTextSha256"], str) or re.fullmatch(
+        r"[0-9a-f]{64}", postcode["extractedTextSha256"]
+    ) is None:
+        return False
+    if outcome == "not_found":
+        return area is None and label_id is None
+    if outcome == "unmapped":
+        return area is not None and label_id is None
+    return (
+        outcome == "resolved"
+        and area is not None
+        and type(label_id) is int
+        and label_id > 0
+    )
 
 
 def _run_matching_stage(

@@ -71,6 +71,7 @@ def enqueue_sales_item(
     *,
     pipeline_version: str,
     excluded_group_ids: Sequence[str] = (),
+    force_reprocess: bool = False,
     now: datetime | None = None,
 ) -> IntakeQueueResult:
     snapshot = _authoritative_snapshot(
@@ -90,6 +91,7 @@ def enqueue_sales_item(
         pipeline_version=pipeline_version,
         trigger_type="operator_enqueue",
         excluded_group_ids=excluded_group_ids,
+        force_reprocess=force_reprocess,
         now=now,
     )
 
@@ -101,6 +103,7 @@ def reconcile_sales_item(
     *,
     pipeline_version: str,
     excluded_group_ids: Sequence[str] = (),
+    force_reprocess: bool = False,
     now: datetime | None = None,
 ) -> ReconcileResult:
     reconciled_at = now or utc_now()
@@ -127,6 +130,7 @@ def reconcile_sales_item(
             pipeline_version=pipeline_version,
             trigger_type="operator_reconcile",
             excluded_group_ids=excluded_group_ids,
+            force_reprocess=force_reprocess,
             now=reconciled_at,
         )
         return ReconcileResult(

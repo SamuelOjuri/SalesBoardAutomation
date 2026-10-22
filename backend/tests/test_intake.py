@@ -332,3 +332,27 @@ def test_download_context_uses_asset_order_and_always_cleans_up() -> None:
 
     assert downloaded_paths
     assert all(not path.exists() for path in downloaded_paths)
+
+
+@pytest.mark.parametrize("status", ["scheduled", "running", "retry_wait"])
+def test_force_reprocessing_rejects_active_work_without_mutating_identity(status) -> None:
+    engine = create_database_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = create_session_factory(engine)
+    snapshot = parse_sales_item_snapshot(item_snapshot(), contract=BOARD_CONTRACT)
+    try:
+        with factory() as session:
+            first = queue_sales_item_snapshot(session, snapshot, pipeline_version="test-v1")
+            first.job.status = status
+            session.commit()
+            with pytest.raises(ValueError, match="active job"):
+                queue_sales_item_snapshot(
+                    session, snapshot, pipeline_version="test-v2", force_reprocess=True
+                )
+            session.commit()
+            assert session.query(ProcessingJob).count() == 1
+            assert first.item.latest_pipeline_version == "test-v1"
+            assert first.job.status == status
+            assert first.job.result_json is None
+    finally:
+        engine.dispose()

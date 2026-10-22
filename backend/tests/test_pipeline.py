@@ -1,12 +1,15 @@
+import copy
 import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import BOARD_CONTRACT, DEFAULT_EXCLUDED_SALES_GROUP_IDS
 from app.database import Base, create_database_engine, create_session_factory
@@ -30,6 +33,7 @@ from app.services.pipeline import (
 from app.services.postcode import DesignParameterExtraction
 from app.services.postcode_evidence import PostcodeEvidence
 from app.services.worker import claim_next_job, retry_or_fail_job
+from app.services.intake import parse_sales_item_snapshot, queue_sales_item_snapshot
 
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
@@ -93,14 +97,18 @@ class FakeMonday:
         self.item = item
         self.content = content
         self.download_count = 0
+        self.intake_read_count = 0
+        self.schema_read_count = 0
         self.mutations: list[Mapping[str, object]] = []
 
     def load_sales_item_intake(self, item_id: str) -> Mapping[str, Any]:
         assert item_id == "42"
+        self.intake_read_count += 1
         return self.item
 
     def load_postcode_dropdown_column(self, board_id: int) -> Mapping[str, Any]:
         assert board_id == BOARD_CONTRACT.sales_board_id
+        self.schema_read_count += 1
         return {
             "id": BOARD_CONTRACT.postcode_column_id,
             "type": "dropdown",
@@ -843,3 +851,452 @@ def test_processing_mode_policy(
 
     assert analysis_allowed(mode, item_id, allowlist) is analysis  # type: ignore[arg-type]
     assert publication_allowed(mode, item_id, allowlist) is publication  # type: ignore[arg-type]
+
+
+class PublishingMonday(FakeMonday):
+    def __init__(self, item: Mapping[str, Any], content: bytes) -> None:
+        super().__init__(item, content)
+        self.postcode_ids: list[str] = []
+        self.account_ids: list[str] = []
+        self.postcode_labels = [
+            {"id": 115, "label": "WA", "is_deactivated": False}
+        ]
+
+    def load_postcode_dropdown_column(self, board_id: int) -> Mapping[str, Any]:
+        column = dict(super().load_postcode_dropdown_column(board_id))
+        column["settings"] = {"labels": self.postcode_labels}
+        return column
+
+    def load_sales_item_for_publication(self, item_id: str) -> Mapping[str, Any]:
+        assert item_id == "42"
+        item = dict(self.item)
+        item["column_values"] = list(item["column_values"]) + [
+            {
+                "id": BOARD_CONTRACT.postcode_column_id,
+                "type": "dropdown",
+                "values": [{"id": value} for value in self.postcode_ids],
+            },
+            {
+                "id": BOARD_CONTRACT.accounts_relation_column_id,
+                "type": "board_relation",
+                "linked_item_ids": self.account_ids,
+            },
+        ]
+        return item
+
+    def change_sales_item_column_values(
+        self, board_id: int, item_id: str, column_values: Mapping[str, object]
+    ) -> None:
+        super().change_sales_item_column_values(board_id, item_id, column_values)
+        if BOARD_CONTRACT.postcode_column_id in column_values:
+            self.postcode_ids = [
+                str(value)
+                for value in column_values[BOARD_CONTRACT.postcode_column_id]["ids"]
+            ]
+        if BOARD_CONTRACT.accounts_relation_column_id in column_values:
+            self.account_ids = [
+                str(value)
+                for value in column_values[BOARD_CONTRACT.accounts_relation_column_id]["item_ids"]
+            ]
+
+
+class EligibleAccountsClient(FlakyAccountsClient):
+    def load_account_item(self, item_id: str) -> Mapping[str, Any] | None:
+        if item_id != self.account_id:
+            return None
+        return FlakyAccountsClient(
+            account_id=self.account_id,
+            account_name=self.account_name,
+            account_domain=self.account_domain,
+        ).load_accounts_page(BOARD_CONTRACT.accounts_board_id)["items"][0]
+
+
+def enable_publication(deps: PipelineDependencies) -> None:
+    deps.publication_gate.apply_schema({
+        "id": BOARD_CONTRACT.sales_board_id,
+        "columns": [
+            {"id": BOARD_CONTRACT.email_file_column_id, "type": "file"},
+            {
+                "id": BOARD_CONTRACT.accounts_relation_column_id,
+                "type": "board_relation",
+                "settings": {"board_ids": [BOARD_CONTRACT.accounts_board_id]},
+            },
+            {
+                "id": BOARD_CONTRACT.postcode_column_id,
+                "type": "dropdown",
+                "settings": {"labels": [
+                    {"id": label.id, "label": label.name}
+                    for label in BOARD_CONTRACT.required_postcode_labels
+                ]},
+            },
+        ],
+    })
+    assert deps.publication_gate.publication_enabled
+
+
+def run_queued_enquiry(
+    database,
+    monday: FakeMonday,
+    deps: PipelineDependencies,
+    *,
+    mode: str = "shadow",
+    pipeline_version: str = "test-v1",
+    force_reprocess: bool = False,
+) -> ProcessingJob:
+    snapshot = parse_sales_item_snapshot(monday.item, contract=BOARD_CONTRACT)
+    with database() as session:
+        now = NOW + timedelta(seconds=session.query(ProcessingJob).count())
+        queued = queue_sales_item_snapshot(
+            session,
+            snapshot,
+            pipeline_version=pipeline_version,
+            force_reprocess=force_reprocess,
+            now=now,
+        )
+        session.commit()
+        claimed = claim_next_job(session, worker_id="worker-a", now=now)
+        assert claimed is not None and claimed.id == queued.job.id
+        session.commit()
+    run_pipeline_job(
+        database, claimed.id, worker_id="worker-a", dependencies=deps,
+        mode=mode, now=now,
+    )
+    with database() as session:
+        return session.get(ProcessingJob, claimed.id)
+
+
+@pytest.fixture
+def completed_enquiry(database):
+    content = eml_bytes()
+    monday = PublishingMonday(sales_item(identity(content)), content)
+    model = FakePostcodeClient()
+    accounts = EligibleAccountsClient()
+    deps = dependencies(monday, model, accounts)
+    enable_publication(deps)
+    completed = run_queued_enquiry(database, monday, deps, mode="enabled")
+    return monday, model, accounts, deps, completed
+
+
+def test_repeated_completed_enquiry_reuses_extraction_and_preserves_human_edits(
+    database, completed_enquiry,
+) -> None:
+    monday, model, accounts, deps, first = completed_enquiry
+    monday.postcode_ids = ["114"]
+    monday.account_ids = ["777"]
+    second = run_queued_enquiry(database, monday, deps, mode="enabled")
+
+    assert second.id != first.id
+    assert second.status == ProcessingJobStatus.COMPLETED.value
+    assert second.result_json["reusedExtractionJobId"] == str(first.id)
+    assert second.result_json["publication"]["postcode"]["outcome"] == "preserved_existing"
+    assert second.result_json["publication"]["accounts"]["outcome"] == "preserved_existing"
+    assert monday.postcode_ids == ["114"]
+    assert monday.account_ids == ["777"]
+    assert len(monday.mutations) == 1
+    assert model.extraction_count == 1
+    assert monday.download_count == 1
+    assert monday.intake_read_count == 5  # First extraction read is saved on repeat.
+    assert monday.schema_read_count == 2  # Both mappings use live settings.
+    assert accounts.page_calls == 2
+    with database() as session:
+        audit = session.query(ProcessingAudit).filter_by(
+            job_id=second.id, event_type="pipeline_stage", outcome="reused"
+        ).one()
+        assert audit.details_json["completedStage"] == ProcessingJobStage.EXTRACTING.value
+        assert session.get(ProcessingJob, first.id).result_json == first.result_json
+
+
+def test_unresolved_shadow_result_can_publish_with_changed_accounts_without_extraction(
+    database,
+) -> None:
+    content = eml_bytes()
+    monday = PublishingMonday(sales_item(identity(content)), content)
+    model = FakePostcodeClient()
+    accounts = EligibleAccountsClient(account_name="Other", account_domain="other.co.uk")
+    deps = dependencies(monday, model, accounts)
+    enable_publication(deps)
+    first = run_queued_enquiry(database, monday, deps)
+    assert first.result_json["account"]["accountItemId"] is None
+    assert first.result_json["publication"] == {"outcome": "shadow_skipped"}
+
+    accounts.account_id = "100"
+    accounts.account_name = "Acme Limited"
+    accounts.account_domain = "acme.co.uk"
+    second = run_queued_enquiry(database, monday, deps, mode="enabled")
+
+    assert second.result_json["reusedExtractionJobId"] == str(first.id)
+    assert second.result_json["account"]["accountItemId"] == "100"
+    assert second.result_json["publication"]["outcome"] == "published"
+    assert monday.account_ids == ["100"]
+    assert monday.postcode_ids == ["115"]
+    assert model.extraction_count == monday.download_count == 1
+
+
+def test_reused_extraction_reevaluates_contact_relationships(database) -> None:
+    class ChangingContacts(ContactAwareAccountsClient):
+        linked_account_id = "1661824839"
+
+        def load_contacts_page(self, *args, **kwargs):
+            page = super().load_contacts_page(*args, **kwargs)
+            page["items"][0]["column_values"][1]["linked_item_ids"] = [
+                self.linked_account_id
+            ]
+            return page
+
+    content = eml_bytes(from_value="Sarah Morrissey <s.morrissey@encon.co.uk>")
+    monday = FakeMonday(sales_item(identity(content)), content)
+    model = FakePostcodeClient(requester_domain="encon.co.uk", company="Encon Group")
+    accounts = ChangingContacts()
+    deps = dependencies(monday, model, accounts)
+    first = run_queued_enquiry(database, monday, deps)
+    accounts.linked_account_id = "1661825541"
+    second = run_queued_enquiry(database, monday, deps)
+
+    assert first.result_json["account"]["accountItemId"] == "1661824839"
+    assert second.result_json["account"]["accountItemId"] == "1661825541"
+    assert second.result_json["reusedExtractionJobId"] == str(first.id)
+    assert accounts.account_page_calls == accounts.contact_page_calls == 2
+    assert model.extraction_count == monday.download_count == 1
+    assert "s.morrissey@encon.co.uk" not in json.dumps(second.result_json)
+
+
+@pytest.mark.parametrize("labels, expected_outcome, expected_label", [
+    ([], "unmapped", None),
+    ([{"id": 114, "label": "WA"}], "resolved", 114),
+])
+def test_reused_postcode_is_remapped_against_live_dropdown(
+    database, completed_enquiry, labels, expected_outcome, expected_label,
+) -> None:
+    monday, model, _, deps, first = completed_enquiry
+    monday.postcode_labels = labels
+    second = run_queued_enquiry(database, monday, deps)
+
+    assert second.result_json["reusedExtractionJobId"] == str(first.id)
+    assert second.result_json["postcode"]["outcome"] == expected_outcome
+    assert second.result_json["postcode"]["labelId"] == expected_label
+    assert model.extraction_count == 1
+
+
+@pytest.mark.parametrize("changed_identity", ["input", "pipeline"])
+def test_changed_input_or_pipeline_requires_new_extraction(
+    database, completed_enquiry, changed_identity,
+) -> None:
+    monday, model, _, deps, _ = completed_enquiry
+    version = "test-v1"
+    if changed_identity == "input":
+        monday.item["assets"][0]["name"] = "renamed.eml"
+    else:
+        version = "test-v2"
+    second = run_queued_enquiry(database, monday, deps, pipeline_version=version)
+
+    assert "reusedExtractionJobId" not in second.result_json
+    assert model.extraction_count == monday.download_count == 2
+
+
+@pytest.mark.parametrize("settings_change", [
+    {"internal_email_domains": ("taperedplus.co.uk", "internal.example")},
+    {"internal_company_aliases": ("New Internal Company",)},
+    {"requester_domain_aliases": {"relay.example": "company.example"}},
+])
+def test_changed_runtime_evidence_rules_invalidate_completed_extraction(
+    database, completed_enquiry, settings_change,
+) -> None:
+    monday, model, _, deps, first = completed_enquiry
+    second = run_queued_enquiry(database, monday, replace(deps, **settings_change))
+
+    assert "reusedExtractionJobId" not in second.result_json
+    assert second.result_json["extractionContextSha256"] != first.result_json["extractionContextSha256"]
+    assert model.extraction_count == monday.download_count == 2
+
+
+@pytest.mark.parametrize("checkpoint_change", [
+    ("extractionContextSha256", None),
+    ("schemaVersion", 2),
+    ("schemaVersion", True),
+    ("inputRevision", "f" * 64),
+    ("pipelineVersion", "outdated"),
+    ("completedStage", "extracting"),
+    ("postcode", {}),
+    ("requester", {}),
+    ("postcode.assetIds", ["900"]),
+    ("postcode.labelId", "invalid"),
+    ("postcode.extractedTextSha256", "invalid"),
+    ("requester.emailAddressSha256", "invalid"),
+    ("requester.emailAddressSha256", None),
+    ("requester.websiteDomains", [123]),
+])
+def test_legacy_or_incomplete_checkpoint_falls_back_to_full_extraction(
+    database, completed_enquiry, checkpoint_change,
+) -> None:
+    monday, model, _, deps, first = completed_enquiry
+    with database() as session:
+        source = session.get(ProcessingJob, first.id)
+        result = copy.deepcopy(source.result_json)
+        path = checkpoint_change[0].split(".")
+        target = result if len(path) == 1 else result[path[0]]
+        target[path[-1]] = checkpoint_change[1]
+        source.result_json = result
+        # Python considers True equal to 1; still persist that damaged JSON type.
+        flag_modified(source, "result_json")
+        session.commit()
+    second = run_queued_enquiry(database, monday, deps)
+
+    assert "reusedExtractionJobId" not in second.result_json
+    assert model.extraction_count == monday.download_count == 2
+
+
+def test_checkpoint_reuse_does_not_copy_unrelated_saved_content(
+    database, completed_enquiry,
+) -> None:
+    monday, _, _, deps, first = completed_enquiry
+    with database() as session:
+        source = session.get(ProcessingJob, first.id)
+        result = copy.deepcopy(source.result_json)
+        result["rawEmail"] = "PRIVATE-OLD-CONTENT"
+        result["postcode"]["rawText"] = "PRIVATE-OLD-CONTENT"
+        result["requester"]["emailAddress"] = "PRIVATE-OLD-CONTENT"
+        source.result_json = result
+        session.commit()
+    second = run_queued_enquiry(database, monday, deps)
+
+    assert second.result_json["reusedExtractionJobId"] == str(first.id)
+    assert "PRIVATE-OLD-CONTENT" not in json.dumps(second.result_json)
+    assert second.result_json["publication"] == {"outcome": "shadow_skipped"}
+
+
+def test_force_reprocess_bypasses_completed_extraction(database, completed_enquiry) -> None:
+    monday, model, _, deps, _ = completed_enquiry
+    second = run_queued_enquiry(database, monday, deps, force_reprocess=True)
+
+    assert "reusedExtractionJobId" not in second.result_json
+    assert model.extraction_count == monday.download_count == 2
+    with database() as session:
+        intake_audit = session.query(ProcessingAudit).filter_by(
+            job_id=second.id, event_type="webhook_intake"
+        ).one()
+        assert intake_audit.details_json["forceReprocess"] is True
+
+
+@pytest.mark.parametrize("previous_outcome", ["not_found", "unmapped"])
+def test_incomplete_postcode_outcomes_remain_reusable(database, previous_outcome) -> None:
+    class NoPostcode(FakePostcodeClient):
+        def extract_design_parameters(self, *args, **kwargs):
+            super().extract_design_parameters(*args, **kwargs)
+            return DesignParameterExtraction(post_code=None)
+
+    content = eml_bytes()
+    monday = PublishingMonday(sales_item(identity(content)), content)
+    model = NoPostcode() if previous_outcome == "not_found" else FakePostcodeClient()
+    monday.postcode_labels = []
+    deps = dependencies(monday, model, EligibleAccountsClient())
+    first = run_queued_enquiry(database, monday, deps)
+    monday.postcode_labels = [{"id": 115, "label": "WA"}]
+    second = run_queued_enquiry(database, monday, deps)
+
+    assert first.result_json["postcode"]["outcome"] == previous_outcome
+    assert second.result_json["reusedExtractionJobId"] == str(first.id)
+    assert second.result_json["postcode"]["outcome"] == (
+        "not_found" if previous_outcome == "not_found" else "resolved"
+    )
+    assert model.extraction_count == monday.download_count == 1
+
+
+@pytest.mark.parametrize("change", ["input", "group", "board", "inactive"])
+def test_reuse_rechecks_authoritative_eligibility_before_matching(
+    database, completed_enquiry, change,
+) -> None:
+    monday, model, accounts, deps, _ = completed_enquiry
+    deps = replace(deps, excluded_group_ids=("excluded",))
+    with database() as session:
+        queued = queue_sales_item_snapshot(
+            session, parse_sales_item_snapshot(monday.item, contract=BOARD_CONTRACT),
+            pipeline_version="test-v1", now=NOW + timedelta(seconds=1),
+        )
+        session.commit()
+        claim_next_job(session, worker_id="worker-a", now=NOW + timedelta(seconds=1))
+        session.commit()
+
+    if change == "input":
+        monday.item["assets"][0]["name"] = "changed.eml"
+    elif change == "group":
+        monday.item["group"]["id"] = "excluded"
+        monday.item["column_values"] = []
+    elif change == "board":
+        monday.item["board"]["id"] = "1882196103"
+        monday.item["column_values"] = []
+    else:
+        monday.item["state"] = "archived"
+
+    outcome = run_pipeline_job(
+        database, queued.job.id, worker_id="worker-a", dependencies=deps,
+        mode="enabled", now=NOW + timedelta(seconds=1),
+    )
+    assert outcome == "superseded"
+    assert model.extraction_count == monday.download_count == 1
+    assert accounts.page_calls == 1
+    assert len(monday.mutations) == 1
+    with database() as session:
+        assert session.get(ProcessingJob, queued.job.id).status == "cancelled"
+
+
+@pytest.mark.parametrize("source_status", ["failed", "cancelled"])
+def test_reuse_requires_a_completed_source(database, completed_enquiry, source_status) -> None:
+    monday, model, _, deps, first = completed_enquiry
+    with database() as session:
+        session.get(ProcessingJob, first.id).status = source_status
+        session.commit()
+    second = run_queued_enquiry(database, monday, deps)
+
+    assert "reusedExtractionJobId" not in second.result_json
+    assert model.extraction_count == monday.download_count == 2
+
+
+def test_force_reprocessing_survives_an_extraction_retry(
+    database, completed_enquiry, monkeypatch,
+) -> None:
+    monday, model, _, deps, _ = completed_enquiry
+    original_extract = model.extract_design_parameters
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("temporary extraction failure")
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(model, "extract_design_parameters", fail_once)
+    with database() as session:
+        queued = queue_sales_item_snapshot(
+            session, parse_sales_item_snapshot(monday.item, contract=BOARD_CONTRACT),
+            pipeline_version="test-v1", force_reprocess=True,
+            now=NOW + timedelta(seconds=1),
+        )
+        session.commit()
+        claim_next_job(session, worker_id="worker-a", now=NOW + timedelta(seconds=1))
+        session.commit()
+    with pytest.raises(TimeoutError):
+        run_pipeline_job(
+            database, queued.job.id, worker_id="worker-a", dependencies=deps,
+            mode="shadow", now=NOW + timedelta(seconds=1),
+        )
+    with database() as session:
+        failed = session.get(ProcessingJob, queued.job.id)
+        assert failed.result_json == {"forceReprocess": True}
+        retry_or_fail_job(
+            session, failed.id, worker_id="worker-a", error=TimeoutError(), now=NOW,
+        )
+        retry_at = failed.next_retry_at
+        session.commit()
+        claim_next_job(session, worker_id="worker-a", now=retry_at)
+        session.commit()
+    run_pipeline_job(
+        database, queued.job.id, worker_id="worker-a", dependencies=deps,
+        mode="shadow", now=retry_at,
+    )
+    assert calls == 2
+    assert monday.download_count == 3
+    with database() as session:
+        completed = session.get(ProcessingJob, queued.job.id)
+        assert completed.status == "completed"
+        assert "reusedExtractionJobId" not in completed.result_json

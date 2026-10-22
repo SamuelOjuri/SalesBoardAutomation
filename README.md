@@ -283,6 +283,21 @@ transport errors, HTTP 429 responses, and server errors up to three times with
 bounded jitter. A retry after an ambiguous publication remains safe because
 Phase 6 post-reads Monday and complete-value writes are idempotent.
 
+When another event or reconciliation queues unchanged Email input, the worker
+reuses extraction evidence from the latest completed job for that same Sales
+item, input manifest/revision, and pipeline version. Reuse also requires matching
+runtime internal-domain, internal-company, and sender-alias rules. Legacy or
+malformed checkpoints fall back to full extraction. The reused checkpoint contains
+only postcode evidence metadata and requester identity; old Account matches and
+publication decisions are discarded. The postcode area is mapped against live
+dropdown settings again, and matching, input eligibility checks, and fill-only
+publication run normally. Accounts and Contacts retain their existing five-minute
+cache policy, so unresolved results and shadow completions can be reevaluated
+without downloading and parsing the same email or calling Gemini again. A reuse
+saves the extraction-stage Monday item read; live schema checks remain in place.
+The result records `reusedExtractionJobId`, and the extraction stage audit records
+`reused`.
+
 Processing modes are enforced by the worker:
 
 - `off` recovers expired leases but claims no work;
@@ -343,8 +358,15 @@ $env:PYTHONPATH = "backend"
 python -m app.operator enqueue 1234567890
 python -m app.operator retry 00000000-0000-0000-0000-000000000000
 python -m app.operator reconcile 1234567890
+python -m app.operator reconcile 1234567890 --force-reprocess
 python -m app.operator metrics
 ```
+
+`enqueue` and `reconcile` accept `--force-reprocess` to bypass completed extraction
+reuse and repeat downloading, parsing, and Gemini extraction. The option is
+persisted for retries of the extraction stage. It requires the item to have no
+active job; it never interrupts a leased worker or silently coalesces a forced
+request. Forced requests are recorded in the intake audit.
 
 Worker timing can be tuned with `WORKER_POLL_INTERVAL_SECONDS`,
 `WORKER_HEARTBEAT_INTERVAL_SECONDS`, `WORKER_LEASE_TIMEOUT_SECONDS`,

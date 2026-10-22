@@ -224,6 +224,7 @@ def queue_sales_item_snapshot(
     pipeline_version: str,
     trigger_type: str = "webhook_email",
     excluded_group_ids: Sequence[str] = (),
+    force_reprocess: bool = False,
     now: datetime | None = None,
 ) -> IntakeQueueResult:
     if is_excluded_sales_group(snapshot.group_id, excluded_group_ids):
@@ -273,11 +274,15 @@ def queue_sales_item_snapshot(
                 session, board_id=snapshot.board_id, item_id=snapshot.item_id
             ).one()
 
-    item.latest_input_revision = revision
-    item.latest_pipeline_version = pipeline_version
     active_job = _active_job_query(
         session, board_id=snapshot.board_id, item_id=snapshot.item_id
     ).first()
+    if force_reprocess and active_job is not None:
+        raise ValueError(
+            "cannot force reprocessing while the Sales item has an active job"
+        )
+    item.latest_input_revision = revision
+    item.latest_pipeline_version = pipeline_version
     if active_job is not None:
         if (
             active_job.input_revision != revision
@@ -311,6 +316,7 @@ def queue_sales_item_snapshot(
         status=ProcessingJobStatus.SCHEDULED.value,
         stage=ProcessingJobStage.EXTRACTING.value,
         scheduled_for=now,
+        result_json={"forceReprocess": True} if force_reprocess else None,
     )
     try:
         with session.begin_nested():
@@ -319,7 +325,11 @@ def queue_sales_item_snapshot(
         job = candidate_job
         outcome: QueueOutcome = "queued"
         created_job = True
-    except IntegrityError:
+    except IntegrityError as error:
+        if force_reprocess:
+            raise ValueError(
+                "cannot force reprocessing while the Sales item has an active job"
+            ) from error
         job = _active_job_query(
             session, board_id=snapshot.board_id, item_id=snapshot.item_id
         ).one()
@@ -336,6 +346,7 @@ def queue_sales_item_snapshot(
         outcome=outcome,
         input_revision=revision,
         pipeline_version=pipeline_version,
+        force_reprocess=force_reprocess,
     )
     return IntakeQueueResult(item, job, outcome, created_job)
 
@@ -420,6 +431,7 @@ def _add_intake_audit(
     outcome: str,
     input_revision: str,
     pipeline_version: str,
+    force_reprocess: bool = False,
 ) -> None:
     session.add(
         ProcessingAudit(
@@ -436,7 +448,10 @@ def _add_intake_audit(
             outcome=outcome,
             input_revision=input_revision,
             pipeline_version=pipeline_version,
-            details_json={"triggerType": trigger_type},
+            details_json={
+                "triggerType": trigger_type,
+                **({"forceReprocess": True} if force_reprocess else {}),
+            },
         )
     )
 
