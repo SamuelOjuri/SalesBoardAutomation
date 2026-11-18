@@ -139,6 +139,27 @@ def test_empty_board_is_a_valid_shared_snapshot(cache_database, board_kind):
     assert second_client.page_calls == []
 
 
+def test_first_refresh_can_autoflush_when_reading_the_clock(
+    cache_database, board_kind, monkeypatch
+):
+    connect, clock = cache_database
+
+    def clock_with_autoflush(session):
+        # SQLAlchemy 2.1 can autoflush before the PostgreSQL clock query.
+        session.flush()
+        return clock[0]
+
+    monkeypatch.setattr(SharedIndexCache, "_now", staticmethod(clock_with_autoflush))
+    first_client = make_client(board_kind)
+    refreshed = make_service(board_kind, connect(), first_client).load_index()
+    second_client = make_client(board_kind)
+    cached = make_service(board_kind, connect(), second_client).load_index()
+
+    assert cached == refreshed
+    assert first_client.page_calls == [None, "last"]
+    assert second_client.page_calls == []
+
+
 def test_force_refresh_and_clear_are_visible_to_other_workers(cache_database, board_kind):
     connect, _ = cache_database
     first_client = make_client(board_kind, two_pages=False)

@@ -10,13 +10,15 @@ from psycopg import OperationalError as PsycopgOperationalError
 from psycopg.errors import (
     AdminShutdown,
     CannotConnectNow,
+    CheckViolation,
     ConnectionFailure,
     CrashShutdown,
     InvalidPassword,
     UndefinedTable,
     UniqueViolation,
 )
-from sqlalchemy.exc import DBAPIError, OperationalError
+from psycopg.pq import DiagnosticField
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 
 from app.config import Settings, build_processing_pipeline_version
 from app.database import Base, create_database_engine, create_session_factory
@@ -468,6 +470,53 @@ def test_worker_logs_only_error_type_not_sensitive_message(
     assert failure_record.outcome == ProcessingJobStatus.RETRY_WAIT.value  # type: ignore[attr-defined]
     assert sensitive_marker not in caplog.text
     assert sensitive_marker not in str(failure_record.__dict__)
+
+
+def test_worker_records_safe_postgres_diagnostics(
+    runtime: WorkerRuntime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime.settings.processing_mode = "shadow"
+    constraint_name = "ck_reference_index_snapshots_complete"
+    sensitive_marker = "PRIVATE-SNAPSHOT-CONTENT-92C1"
+    with runtime.session_factory() as session:
+        job = add_job(session, item_id="352")
+        job.stage = ProcessingJobStage.MATCHING_ACCOUNT.value
+        job_id = job.id
+        session.commit()
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        original = CheckViolation(
+            sensitive_marker,
+            info={
+                DiagnosticField.CONSTRAINT_NAME: constraint_name.encode(),
+                DiagnosticField.MESSAGE_DETAIL: sensitive_marker.encode(),
+            },
+        )
+        raise IntegrityError(
+            "UPDATE reference_index_snapshots SET payload_json = :payload",
+            {"payload": sensitive_marker},
+            original,
+        ) from original
+
+    assert process_next_job(runtime, pipeline_runner=fail_pipeline, now=NOW)
+
+    [failure_record] = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert "error_code=gkpj" in failure_record.getMessage()
+    assert "sqlstate=23514" in failure_record.getMessage()
+    assert f"constraint_name={constraint_name}" in failure_record.getMessage()
+    assert failure_record.__dict__["sqlstate"] == "23514"
+    assert failure_record.__dict__["constraint_name"] == constraint_name
+    assert sensitive_marker not in str(failure_record.__dict__)
+    assert "UPDATE reference_index_snapshots" not in caplog.text
+    with runtime.session_factory() as session:
+        audit = session.query(ProcessingAudit).filter_by(
+            job_id=job_id, event_type="worker_failure"
+        ).one()
+        assert audit.details_json["errorCode"] == "gkpj"
+        assert audit.details_json["sqlstate"] == "23514"
+        assert audit.details_json["constraintName"] == constraint_name
+        assert sensitive_marker not in str(audit.details_json)
 
 
 def test_retryable_intake_snapshot_failure_records_safe_reason(

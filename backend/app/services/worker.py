@@ -8,7 +8,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from psycopg import Error as PsycopgError
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -244,6 +246,19 @@ def safe_error_details(error: BaseException) -> dict[str, str]:
         ):
             details["errorCode"] = raw_code
             break
+    for candidate in chain:
+        original = candidate.orig if isinstance(candidate, DBAPIError) else candidate
+        if not isinstance(original, PsycopgError):
+            continue
+        sqlstate = original.sqlstate
+        if sqlstate is not None and re.fullmatch(r"[A-Z0-9]{5}", sqlstate):
+            details["sqlstate"] = sqlstate
+        constraint_name = original.diag.constraint_name
+        if constraint_name is not None and re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_$]{0,62}", constraint_name
+        ):
+            details["constraintName"] = constraint_name
+        break
     return details
 
 

@@ -296,7 +296,7 @@ def process_next_job(
         logger.error(
             "processing job failed job_id=%s item_id=%s stage=%s "
             "attempt_count=%s error_type=%s error_code=%s "
-            "root_cause_type=%s outcome=%s",
+            "root_cause_type=%s outcome=%s sqlstate=%s constraint_name=%s",
             job.id,
             job.item_id,
             failure_stage,
@@ -305,6 +305,8 @@ def process_next_job(
             safe_details.get("errorCode", "none"),
             safe_details["rootCauseType"],
             failure_status,
+            safe_details.get("sqlstate", "none"),
+            safe_details.get("constraintName", "none"),
             extra={
                 "job_id": str(job.id),
                 "item_id": job.item_id,
@@ -314,6 +316,8 @@ def process_next_job(
                 "error_code": safe_details.get("errorCode"),
                 "root_cause_type": safe_details["rootCauseType"],
                 "outcome": failure_status,
+                "sqlstate": safe_details.get("sqlstate"),
+                "constraint_name": safe_details.get("constraintName"),
             },
         )
     return True

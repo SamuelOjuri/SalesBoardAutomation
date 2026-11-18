@@ -77,8 +77,11 @@ class SharedIndexCache:
 
             record_usage(session, index_kind, "cache_misses")
             index = fetch_index()
-            snapshot.payload_json = json.loads(adapter.dump_json(index))
-            snapshot.refreshed_at = self._now(session)
+            payload_json = json.loads(adapter.dump_json(index))
+            # The clock query can autoflush. Read it before changing either column.
+            refreshed_at = self._now(session)
+            snapshot.payload_json = payload_json
+            snapshot.refreshed_at = refreshed_at
             return index
 
     def clear(self, *, index_kind: IndexKind, board_id: int) -> None:
